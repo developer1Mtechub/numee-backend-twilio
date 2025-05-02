@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Subscription Success</title>
+    <style>
+        /* General reset */
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            background-color: #f4f4f9;
+            color: #333;
+            height: 100vh; /* Full height of the viewport */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+    
+        img {
+            margin-top: 20px;
+            width: 90px;
+            height: auto;
+        }
+    
+        /* Centered container */
+        .container {
+            max-width: 600px;
+            /* background: #fff; */
+            border-radius: 10px;
+            /* box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); */
+            padding: 20px;
+            text-align: center;
+        }
+    
+        h1 {
+            font-size: 25px;
+            color: #585CF1;
+        }
+    
+        p {
+            font-size: 14px;
+            font-weight: medium;
+            letter-spacing: 1px;
+            margin: 10px 0;
+            color: #666;
+        }
+    
+        strong {
+            color: #007bff;
+        }
+    
+        /* Form styling */
+        form {
+            margin-top: 20px;
+        }
+    
+        button {
+            background-color: #585CF1;
+            color: #fff;
+            border: none;
+            padding: 10px 20px;
+            font-size: 13px;
+            font-weight: 500;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+    
+        /* Footer text */
+        .footer {
+            margin-top: 20px;
+            font-size: 0.9rem;
+            color: #666;
+        }
+    </style>
+    
+</head>
+
+<body>
+    <div class="container">
+        <img src="https://res.cloudinary.com/ddorrmob5/image/upload/v1736491544/lpmsgufwi1kjvebicfnd.png" alt="Success Checkmark">
+        <!-- 🎉 -->
+          <h1> Subscription Successful!</h1>
+        <p>Your subscription was successfully created. Enjoy uninterrupted access to our services!</p>
+
+        <!-- <p>Session ID: <strong><%= session_id %></strong></p>
+        <p>Payment Status: <strong>True</strong></p> -->
+
+        <!-- Add a form -->
+        <form id="myForm">
+            <!-- Hidden inputs to include session_id and payment_status -->
+            <input type="hidden" id="session_id" name="session_id" value="<%= session_id %>">
+            <input type="hidden" id="payment_status" name="payment_status" value="true">
+
+            <button type="button" onclick="sendData()">Back To Home</button>
+        </form>
+
+        <!-- Footer -->
+        <div class="footer">
+            <p>Thank you for subscribing to our service!</p>
+        </div>
+    </div>
+
+    <!-- Your script -->
+    <script>
+        function sendData() {
+            const form = document.getElementById('myForm');
+            const formData = new FormData(form);
+            const data = {};
+            formData.forEach((value, key) => {
+                data[key] = value;
+            });
+            window.ReactNativeWebView.postMessage(JSON.stringify(data));
+        }
+    </script>
+</body>
+
+</html>
