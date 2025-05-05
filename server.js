@@ -6,11 +6,16 @@ const path = require("path");
 const twilio = require("twilio");
 // Add Firebase Admin SDK for push notifications
 const admin = require("firebase-admin");
+// Add Stripe initialization
+const Stripe = require("stripe");
 
 // Import database connection pool (previously commented out)
 const pool = require("./app/config/dbconfig");
 
 dotenv.config();
+
+// Initialize Stripe with your secret key
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
 admin.initializeApp({
   credential: admin.credential.cert({
@@ -699,6 +704,17 @@ app.post("/twiml", (req, res) => {
 
     console.log(`Call from ${from} to ${to}`);
 
+    // Add defensive check for empty 'to' parameter
+    if (!to) {
+      console.error("Missing 'to' parameter in TwiML request");
+      voiceResponse.say(
+        "Sorry, we couldn't determine who to call. Please try again."
+      );
+      voiceResponse.hangup();
+      res.type("text/xml");
+      return res.send(voiceResponse.toString());
+    }
+
     // Check if we're calling a client (app user) or regular number
     if (to.indexOf("client:") === 0) {
       // This is a call to another app user
@@ -764,18 +780,19 @@ app.post("/call/make", async (req, res) => {
   }
 
   try {
-    // Get the current host from the request for dynamic webhook URLs
-    const host = req.get("host");
-    const protocol = req.protocol;
-    const baseUrl = `${protocol}://${host}`;
-
-    // Create TwiML URL with proper query parameters
-    const twimlUrl = `${baseUrl}/twiml`;
-    console.log("Using TwiML URL:", twimlUrl);
-
-    // Add status callback to track call progress
+    // Use the backend_url from environment variable as the base for all webhook URLs
+    // This ensures that Twilio can reach your server regardless of where the request comes from
+    const twimlUrl = `${backend_url}/twiml`;
     const statusCallback = `${backend_url}/call-status`;
+
+    console.log("Using TwiML URL:", twimlUrl);
     console.log("Using status callback URL:", statusCallback);
+
+    // Add debug logging to help identify issues
+    console.log("Twilio credentials:", {
+      sid: process.env.TWILIO_ACCOUNT_SID ? "exists" : "missing",
+      token: process.env.TWILIO_AUTH_TOKEN ? "exists" : "missing",
+    });
 
     const call = await twilioClient.calls.create({
       url: twimlUrl,
