@@ -372,28 +372,47 @@ app.post("/call/incoming", async (req, res) => {
     try {
       // First, try to find the user by the Twilio number
       if (to) {
-        // const numberLookupQuery = await client.query(
-        //   `SELECT user_id, email FROM twilio_number_mapping WHERE twilio_number = $1 AND is_active = true`,
-        //   [to]
-        // );
+        const formattedTo = to.trim(); // Ensure no leading/trailing spaces
         const numberLookupQuery = await client.query(
-          `SELECT u.id as user_id, u.email 
-   FROM user_numbers un
-   JOIN Users u ON u.id = un.user_id
-   WHERE un.number = $1`,
-          [to]
+          `SELECT user_id, email FROM twilio_number_mapping WHERE twilio_number = $1 AND is_active = true`,
+          [formattedTo]
         );
         console.log("to data", to, numberLookupQuery.rows);
+
         if (numberLookupQuery.rows.length > 0) {
           targetUserId = numberLookupQuery.rows[0].user_id;
           targetEmail = numberLookupQuery.rows[0].email;
           console.log(
-            `Found user ID ${targetUserId} with email ${targetEmail} for Twilio number ${to}`
+            `✅ Found user ID ${targetUserId} with email ${targetEmail} for Twilio number ${formattedTo}`
           );
         } else {
-          console.log(`No user found for Twilio number ${to} in database`);
+          console.warn(`⚠️ No user found for Twilio number: ${formattedTo}`);
         }
       }
+
+      //     if (to) {
+      //       // const numberLookupQuery = await client.query(
+      //       //   `SELECT user_id, email FROM twilio_number_mapping WHERE twilio_number = $1 AND is_active = true`,
+      //       //   [to]
+      //       // );
+      //       const numberLookupQuery = await client.query(
+      //         `SELECT u.id as user_id, u.email
+      //  FROM user_numbers un
+      //  JOIN Users u ON u.id = un.user_id
+      //  WHERE un.number = $1`,
+      //         [to]
+      //       );
+      //       console.log("to data", to, numberLookupQuery.rows);
+      //       if (numberLookupQuery.rows.length > 0) {
+      //         targetUserId = numberLookupQuery.rows[0].user_id;
+      //         targetEmail = numberLookupQuery.rows[0].email;
+      //         console.log(
+      //           `Found user ID ${targetUserId} with email ${targetEmail} for Twilio number ${to}`
+      //         );
+      //       } else {
+      //         console.log(`No user found for Twilio number ${to} in database`);
+      //       }
+      //     }
 
       // If still no user found, try to determine from clientIdentity
       if (!targetUserId && !targetEmail && clientIdentity) {
