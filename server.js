@@ -353,7 +353,7 @@ app.post("/call/incoming", async (req, res) => {
     const to = req.body.To; // The Twilio number that was called
     const from = req.body.From; // The number that initiated the call
     const callSid = req.body.CallSid;
-
+    console.log("req.bodu", req.body);
     // Track the call in the store
     callStore.trackCall(callSid, { from, to });
 
@@ -763,13 +763,36 @@ app.post("/twiml", (req, res) => {
 
 // Fix: Initialize Twilio client properly with Account SID and Auth Token
 // Note: For API Key auth, need to use different initialization method
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN // You need to add this to your .env file
-);
-
-// Alternative method using API Key (if you prefer):
-// const twilioClient = twilio(accountSid, apiKey, apiSecret, { accountSid });
+let twilioClient;
+try {
+  // First try initializing with Account SID and Auth Token
+  if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
+    console.log("Initializing Twilio client with Account SID and Auth Token");
+    twilioClient = twilio(
+      process.env.TWILIO_ACCOUNT_SID,
+      process.env.TWILIO_AUTH_TOKEN
+    );
+  }
+  // Fall back to API Key authentication if available
+  else if (
+    process.env.TWILIO_ACCOUNT_SID &&
+    process.env.TWILIO_API_KEY &&
+    process.env.TWILIO_API_SECRET
+  ) {
+    console.log("Initializing Twilio client with API Key and Secret");
+    twilioClient = twilio(
+      process.env.TWILIO_API_KEY,
+      process.env.TWILIO_API_SECRET,
+      {
+        accountSid: process.env.TWILIO_ACCOUNT_SID,
+      }
+    );
+  } else {
+    console.error("Missing required Twilio credentials!");
+  }
+} catch (error) {
+  console.error("Error initializing Twilio client:", error.message);
+}
 
 app.post("/call/make", async (req, res) => {
   const { to, from, fromIdentity } = req.body;
