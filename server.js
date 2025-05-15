@@ -353,7 +353,7 @@ app.post("/call/incoming", async (req, res) => {
     const to = req.body.To; // The Twilio number that was called
     const from = req.body.From; // The number that initiated the call
     const callSid = req.body.CallSid;
-    console.log("req.bodu", req.body);
+
     // Track the call in the store
     callStore.trackCall(callSid, { from, to });
 
@@ -372,11 +372,18 @@ app.post("/call/incoming", async (req, res) => {
     try {
       // First, try to find the user by the Twilio number
       if (to) {
+        // const numberLookupQuery = await client.query(
+        //   `SELECT user_id, email FROM twilio_number_mapping WHERE twilio_number = $1 AND is_active = true`,
+        //   [to]
+        // );
         const numberLookupQuery = await client.query(
-          `SELECT user_id, email FROM twilio_number_mapping WHERE twilio_number = $1 AND is_active = true`,
+          `SELECT u.id as user_id, u.email 
+   FROM user_numbers un
+   JOIN Users u ON u.id = un.user_id
+   WHERE un.number = $1`,
           [to]
         );
-
+        console.log("to data", to, numberLookupQuery.rows);
         if (numberLookupQuery.rows.length > 0) {
           targetUserId = numberLookupQuery.rows[0].user_id;
           targetEmail = numberLookupQuery.rows[0].email;
