@@ -761,7 +761,7 @@ app.post("/call-action-result", (req, res) => {
 // Improve the TwiML response for outgoing calls
 app.post("/twiml", (req, res) => {
   console.log("TwiML endpoint called with body:", req.body);
-  console.log(`[TWIML] Called with SID: ${req.body} `);
+  console.log(`[TWIML] Called with SID: ${req.body.CallSid || "unknown"}`);
 
   try {
     const voiceResponse = new twiml.VoiceResponse();
@@ -769,8 +769,9 @@ app.post("/twiml", (req, res) => {
     // Get the To parameter (who we're calling)
     const to = req.body.To || "";
     const from = req.body.From || "";
+    const callSid = req.body.CallSid || "";
 
-    console.log(`Call from ${from} to ${to}`);
+    console.log(`Call from ${from} to ${to} with SID ${callSid}`);
 
     // Add defensive check for empty 'to' parameter
     if (!to) {
@@ -781,6 +782,21 @@ app.post("/twiml", (req, res) => {
       voiceResponse.hangup();
       res.type("text/xml");
       return res.send(voiceResponse.toString());
+    }
+
+    // Check if this call is already in our store to prevent duplicates
+    const existingCall = callStore.getCall(callSid);
+    if (existingCall && existingCall.dialed) {
+      console.log(`Call ${callSid} already dialed, skipping duplicate dial`);
+      // Just add a simple message instead of dialing again
+      voiceResponse.say("Call is already connected.");
+      res.type("text/xml");
+      return res.send(voiceResponse.toString());
+    }
+
+    // Mark this call as dialed to prevent duplicate dials
+    if (callSid) {
+      callStore.trackCall(callSid, { dialed: true });
     }
 
     // Check if we're calling a client (app user) or regular number
