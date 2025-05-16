@@ -773,9 +773,14 @@ app.post("/twiml", (req, res) => {
     const direction = req.body.Direction || "";
     const callStatus = req.body.CallStatus || "";
 
+    // Get the unique ID from query parameters that we added in the call/make endpoint
+    const callUniqueId = req.query.callUniqueId || req.body.callUniqueId || "";
+
     // Add debug logs to trace call flow
     console.log(`Call from ${from} to ${to} with SID ${callSid}`);
-    console.log(`Call direction: ${direction}, status: ${callStatus}`);
+    console.log(
+      `Call direction: ${direction}, status: ${callStatus}, uniqueId: ${callUniqueId}`
+    );
     console.log("Call details:", JSON.stringify(req.body));
 
     // Add defensive check for empty 'to' parameter
@@ -789,8 +794,8 @@ app.post("/twiml", (req, res) => {
       return res.send(voiceResponse.toString());
     }
 
-    // Create a deduplication key using CallSid and To number
-    const dedupKey = `${callSid}-${to}`;
+    // Create a deduplication key using CallSid, To number and unique ID if available
+    const dedupKey = callUniqueId ? `${callUniqueId}` : `${callSid}-${to}`;
 
     // See if this is a duplicate call attempt
     if (global.processedCalls && global.processedCalls[dedupKey]) {
@@ -829,33 +834,35 @@ app.post("/twiml", (req, res) => {
 
     // Mark this call as dialed to prevent duplicate dials
     if (callSid) {
-      callStore.trackCall(callSid, { dialed: true });
+      callStore.trackCall(callSid, { dialed: true, callUniqueId });
     }
 
-    // This is the key change: Instead of using <Dial> which creates a second outbound call,
-    // we use direct connection without dialing again
-
-    // Check if we're calling a client (app user) or regular number
+    // Different handling based on the destination type and whether it's an app user or phone number
     if (to.indexOf("client:") === 0) {
       // This is a call to another app user
       const clientId = to.split(":")[1];
 
-      // For client calls, we simply connect directly without a message
-      // Removed use of the <Dial> verb as it creates a second call
-      voiceResponse.say({ voice: "woman" }, "Connecting your call now.");
-
-      // Use Twilio's Voice SDK capabilities - instead of <Dial> which creates a second call
-      // The client should be already connected at this point through the API call
-      console.log(`Directly handling client connection: ${clientId}`);
-    } else {
-      // This is a call to a regular phone number
-      // For PSTN calls we must use dial, but we'll skip any introductory messages
-      // to make it feel like a direct connection
+      // For client connections, we won't use a voice message to avoid the "second call" feeling
+      // The dial verb is still necessary to make the connection
       const dial = voiceResponse.dial({
         callerId: from,
         timeout: 30,
         action: `${backend_url}/call-action-result`,
         method: "POST",
+        // Critical: Record this value so we don't create another outbound call
+        record: "do-not-record",
+      });
+      dial.client(clientId);
+      console.log(`Connecting to client: ${clientId}`);
+    } else {
+      // This is a call to a regular phone number - no introductory message
+      const dial = voiceResponse.dial({
+        callerId: from,
+        timeout: 30,
+        action: `${backend_url}/call-action-result`,
+        method: "POST",
+        // Critical: Record this value so we don't create another outbound call
+        record: "do-not-record",
       });
       dial.number(to);
       console.log(`Connecting to number: ${to}`);
@@ -1023,9 +1030,15 @@ app.post("/call/make", async (req, res) => {
       });
     }
 
+    // Generate a unique identifier for this call attempt to prevent duplication
+    const callUniqueId = `${from}-${to}-${Date.now()}`;
+    console.log(`Generated unique call ID: ${callUniqueId}`);
+
     // Use the backend_url from environment variable as the base for all webhook URLs
     // This ensures that Twilio can reach your server regardless of where the request comes from
-    const twimlUrl = `${backend_url}/twiml`;
+    const twimlUrl = `${backend_url}/twiml?callUniqueId=${encodeURIComponent(
+      callUniqueId
+    )}`;
     const statusCallback = `${backend_url}/call-status`;
 
     console.log("Using TwiML URL:", twimlUrl);
@@ -1098,12 +1111,27 @@ app.post("/call/make", async (req, res) => {
 app.post("/call-status", (req, res) => {
   const callSid = req.body.CallSid;
   const callStatus = req.body.CallStatus;
-  console.log(
-    `[CALL STATUS] SID: ${req.body.CallSid} | Status: ${req.body.CallStatus}`
-  );
+  const parentCallSid = req.body.ParentCallSid;
 
-  console.log(`Call ${callSid} status update: ${callStatus}`);
-  console.log("Call status details:", req.body);
+  console.log(
+    `[CALL STATUS] SID: ${callSid} | Status: ${callStatus} | Parent SID: ${
+      parentCallSid || "none"
+    }`
+  );
+  console.log("Full call status update:", JSON.stringify(req.body));
+
+  // Check if this is a child call created by the <Dial> verb
+  if (parentCallSid) {
+    console.log(
+      `This is a child call of parent call ${parentCallSid}. This indicates Twilio created a second call.`
+    );
+
+    // Get the parent call details
+    const parentCall = callStore.getCall(parentCallSid);
+    if (parentCall) {
+      console.log(`Parent call details: ${JSON.stringify(parentCall)}`);
+    }
+  }
 
   // Update call status in the store
   callStore.updateStatus(callSid, callStatus);
@@ -1578,6 +1606,9 @@ app.use(
   require("./app/routes/subscription/subscriptionRoutes")
 );
 
+// Add test routes for the duplicate call fix
+app.use("/test/duplicate-call-fix", require("./tests/fix-duplicate-test"));
+
 // Add payment routes for Stripe Payment Intent
 app.post("/create-payment-intent", async (req, res) => {
   const client = await pool.connect();
@@ -1883,3 +1914,7 @@ app.get("/db-check", async (req, res) => {
 app.listen(port, () => {
   console.log(`Server is running on port ${port}.`);
 });
+
+// Include the direct call API endpoints
+require("./direct-call-api.js");
+require("./direct-call-fix.js");
