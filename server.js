@@ -643,6 +643,7 @@ app.post("/call/incoming", async (req, res) => {
     // Client-to-client calls (app-to-app)
     if (to && to.indexOf("client:") === 0) {
       const client = to.split(":")[1];
+      // Direct connection without a message
       const dial = voiceResponse.dial({
         callerId: from || callerId,
         timeout: 30,
@@ -654,9 +655,8 @@ app.post("/call/incoming", async (req, res) => {
     }
     // If we have a specific client identity passed as a parameter
     else if (clientIdentity) {
-      voiceResponse.say(
-        "Thanks for calling. Please wait while we connect you."
-      );
+      // Brief message followed by connection
+      voiceResponse.say("Connecting you now");
       const dial = voiceResponse.dial({
         callerId: from || callerId,
         timeout: 30,
@@ -771,7 +771,9 @@ app.post("/twiml", (req, res) => {
     const from = req.body.From || "";
     const callSid = req.body.CallSid || "";
 
+    // Add debug logs to trace call flow
     console.log(`Call from ${from} to ${to} with SID ${callSid}`);
+    console.log("Call details:", JSON.stringify(req.body));
 
     // Add defensive check for empty 'to' parameter
     if (!to) {
@@ -784,12 +786,40 @@ app.post("/twiml", (req, res) => {
       return res.send(voiceResponse.toString());
     }
 
+    // Create a deduplication key using CallSid and To number
+    const dedupKey = `${callSid}-${to}`;
+
+    // See if this is a duplicate call attempt
+    if (global.processedCalls && global.processedCalls[dedupKey]) {
+      console.log(
+        `Duplicate call detected for ${dedupKey}, skipping dial action`
+      );
+      voiceResponse.say("Call is already in progress.");
+      voiceResponse.hangup();
+      res.type("text/xml");
+      return res.send(voiceResponse.toString());
+    }
+
+    // Mark this call as processed to prevent duplicates
+    if (!global.processedCalls) {
+      global.processedCalls = {};
+    }
+    global.processedCalls[dedupKey] = Date.now();
+
+    // Set up automatic cleanup of processed calls after 5 minutes
+    setTimeout(() => {
+      if (global.processedCalls && global.processedCalls[dedupKey]) {
+        delete global.processedCalls[dedupKey];
+      }
+    }, 5 * 60 * 1000);
+
     // Check if this call is already in our store to prevent duplicates
     const existingCall = callStore.getCall(callSid);
     if (existingCall && existingCall.dialed) {
       console.log(`Call ${callSid} already dialed, skipping duplicate dial`);
       // Just add a simple message instead of dialing again
       voiceResponse.say("Call is already connected.");
+      voiceResponse.hangup();
       res.type("text/xml");
       return res.send(voiceResponse.toString());
     }
@@ -803,29 +833,24 @@ app.post("/twiml", (req, res) => {
     if (to.indexOf("client:") === 0) {
       // This is a call to another app user
       const clientId = to.split(":")[1];
-      voiceResponse.say("Connecting you to another user.");
 
+      // DIRECT CONNECTION: Removed the "Connecting you to another user" message to avoid the call being perceived as a new call
       const dial = voiceResponse.dial({
         callerId: from,
         timeout: 30,
         action: `${backend_url}/call-action-result`,
         method: "POST",
-        // Record the call if needed
-        // record: 'record-from-answer',
       });
       dial.client(clientId);
       console.log(`Connecting to client: ${clientId}`);
     } else {
       // This is a call to a regular phone number
-      voiceResponse.say("Connecting your call.");
-
+      // DIRECT CONNECTION: Removed the "Connecting your call" message to avoid the call being perceived as a new call
       const dial = voiceResponse.dial({
         callerId: from,
         timeout: 30,
         action: `${backend_url}/call-action-result`,
         method: "POST",
-        // Record the call if needed
-        // record: 'record-from-answer',
       });
       dial.number(to);
       console.log(`Connecting to number: ${to}`);
@@ -880,7 +905,7 @@ try {
 
 // Add simple greeting call API endpoint
 app.post("/call/make-greeting", async (req, res) => {
-  const { to, from } = req.body;
+  const { to, from, audioUrl } = req.body;
 
   if (!to) {
     console.log("Missing 'to' parameter for greeting call.");
@@ -912,13 +937,19 @@ app.post("/call/make-greeting", async (req, res) => {
     }
 
     // Use the greeting TwiML endpoint with full URL
-    const greetingTwimlUrl = `${backend_url}/twiml-greeting`;
+    let greetingTwimlUrl = `${backend_url}/twiml-greeting`;
+
+    // If an audio URL is provided for a human voice recording, pass it to the TwiML endpoint
+    if (audioUrl) {
+      greetingTwimlUrl += `?audioUrl=${encodeURIComponent(audioUrl)}`;
+    }
 
     // Add extensive debugging
     console.log("Making greeting call with the following parameters:");
     console.log("- From:", from);
     console.log("- To:", to);
     console.log("- TwiML URL:", greetingTwimlUrl);
+    console.log("- Audio URL:", audioUrl || "Not provided (using robot voice)");
     console.log("- Backend URL:", backend_url);
 
     // Simplified call with minimal parameters - just what's needed for the greeting
@@ -934,6 +965,7 @@ app.post("/call/make-greeting", async (req, res) => {
       to,
       direction: "outbound",
       callType: "greeting",
+      audioUrl: audioUrl || null,
     });
 
     console.log("Greeting call initiated:", call.sid);
@@ -1134,20 +1166,30 @@ app.all("/twiml-greeting", (req, res) => {
     // Create a simple voice response
     const voiceResponse = new twiml.VoiceResponse();
 
-    // Add a longer greeting message
-    voiceResponse.say(
-      { voice: "woman", language: "en-US" },
-      "Hello, this is an automated greeting call from Numee. Thank you for your interest in our service. We are excited to have you on board and look forward to helping you with your communication needs."
-    );
+    // Check if a custom audio URL is provided (for human voice recordings)
+    const audioUrl = req.query.audioUrl || req.body.audioUrl;
 
-    // Add a significant pause to make the call last longer
-    voiceResponse.pause({ length: 3 });
+    if (audioUrl) {
+      // Play a pre-recorded human voice message
+      console.log("Using custom audio recording:", audioUrl);
+      voiceResponse.play({ loop: 1 }, audioUrl);
+      voiceResponse.pause({ length: 1 });
+    } else {
+      // Fallback to the text-to-speech robot voice if no audio URL is provided
+      voiceResponse.say(
+        { voice: "woman", language: "en-US" },
+        "Hello, this is an automated greeting call from Numee. Thank you for your interest in our service. We are excited to have you on board and look forward to helping you with your communication needs."
+      );
 
-    // Add another message
-    voiceResponse.say(
-      { voice: "woman", language: "en-US" },
-      "If you have any questions or need assistance, please don't hesitate to contact our support team. Have a great day!"
-    );
+      // Add a significant pause to make the call last longer
+      voiceResponse.pause({ length: 3 });
+
+      // Add another message
+      voiceResponse.say(
+        { voice: "woman", language: "en-US" },
+        "If you have any questions or need assistance, please don't hesitate to contact our support team. Have a great day!"
+      );
+    }
 
     // Add another pause before ending
     voiceResponse.pause({ length: 2 });
