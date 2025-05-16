@@ -1118,8 +1118,23 @@ app.all("/twiml-greeting", (req, res) => {
     // Create a simple voice response
     const voiceResponse = new twiml.VoiceResponse();
 
-    // Add a simple greeting message
-    voiceResponse.say("Hi, how can I help you today?");
+    // Add a longer greeting message
+    voiceResponse.say(
+      { voice: "woman", language: "en-US" },
+      "Hello, this is an automated greeting call from Numee. Thank you for your interest in our service. We are excited to have you on board and look forward to helping you with your communication needs."
+    );
+
+    // Add a significant pause to make the call last longer
+    voiceResponse.pause({ length: 3 });
+
+    // Add another message
+    voiceResponse.say(
+      { voice: "woman", language: "en-US" },
+      "If you have any questions or need assistance, please don't hesitate to contact our support team. Have a great day!"
+    );
+
+    // Add another pause before ending
+    voiceResponse.pause({ length: 2 });
 
     // End the call after the greeting
     voiceResponse.hangup();
@@ -1148,8 +1163,11 @@ app.get("/test-greeting-twiml", (req, res) => {
 
   const voiceResponse = new twiml.VoiceResponse();
   voiceResponse.say(
-    "This is a test greeting. If you see this, TwiML generation is working correctly."
+    { voice: "woman", language: "en-US" },
+    "This is a test greeting with an extended message. The real greeting will be longer and include pauses to ensure the call doesn't end too quickly. If you see this, TwiML generation is working correctly."
   );
+  voiceResponse.pause({ length: 2 });
+  voiceResponse.say("Thank you for testing our system.");
   voiceResponse.hangup();
 
   // Send as both XML and in an HTML wrapper for easy browser testing
