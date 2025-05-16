@@ -246,6 +246,47 @@ const callStore = {
   },
 };
 
+// Call deduplication store to prevent duplicate calls
+const callDedupStore = {
+  recentCalls: {},
+
+  // Check if a call to this number was recently initiated (within debounce time)
+  checkAndAddCall: function (fromNumber, toNumber, debounceTimeMs = 3000) {
+    const callKey = `${fromNumber}->${toNumber}`;
+    const now = Date.now();
+
+    // Check if a call to this number was initiated recently
+    if (
+      this.recentCalls[callKey] &&
+      now - this.recentCalls[callKey] < debounceTimeMs
+    ) {
+      console.log(
+        `Duplicate call attempt detected: ${callKey} (within ${debounceTimeMs}ms)`
+      );
+      return false; // Don't allow the call - too soon after last attempt
+    }
+
+    // Allow the call and record the timestamp
+    this.recentCalls[callKey] = now;
+    return true;
+  },
+
+  // Cleanup method to remove old entries (called periodically)
+  cleanup: function (maxAgeMs = 60000) {
+    const now = Date.now();
+    for (const key in this.recentCalls) {
+      if (now - this.recentCalls[key] > maxAgeMs) {
+        delete this.recentCalls[key];
+      }
+    }
+  },
+};
+
+// Set up periodic cleanup of the deduplication store (every minute)
+setInterval(() => {
+  callDedupStore.cleanup();
+}, 60000);
+
 const app = express();
 // const port = 3091;
 const port = 3091;
@@ -720,6 +761,7 @@ app.post("/call-action-result", (req, res) => {
 // Improve the TwiML response for outgoing calls
 app.post("/twiml", (req, res) => {
   console.log("TwiML endpoint called with body:", req.body);
+  console.log(`[TWIML] Called with SID: ${req.body} `);
 
   try {
     const voiceResponse = new twiml.VoiceResponse();
@@ -820,6 +862,95 @@ try {
   console.error("Error initializing Twilio client:", error.message);
 }
 
+// Add simple greeting call API endpoint
+app.post("/call/make-greeting", async (req, res) => {
+  const { to, from } = req.body;
+
+  if (!to) {
+    console.log("Missing 'to' parameter for greeting call.");
+    return res.status(400).json({
+      success: false,
+      error: "Missing 'to' parameter. Please provide a phone number to call.",
+    });
+  }
+
+  if (!from) {
+    console.log("Missing 'from' parameter for greeting call.");
+    return res.status(400).json({
+      success: false,
+      error: "Missing 'from' parameter. Please provide a valid Twilio number.",
+    });
+  }
+
+  try {
+    // Check for duplicate call attempt
+    if (!callDedupStore.checkAndAddCall(from, to)) {
+      console.log(
+        `Rejecting duplicate greeting call attempt from ${from} to ${to}`
+      );
+      return res.status(429).json({
+        success: false,
+        error:
+          "A call to this number was just initiated. Please wait a moment before trying again.",
+      });
+    }
+
+    // Use the greeting TwiML endpoint with full URL
+    const greetingTwimlUrl = `${backend_url}/twiml-greeting`;
+
+    // Add extensive debugging
+    console.log("Making greeting call with the following parameters:");
+    console.log("- From:", from);
+    console.log("- To:", to);
+    console.log("- TwiML URL:", greetingTwimlUrl);
+    console.log("- Backend URL:", backend_url);
+
+    // Simplified call with minimal parameters - just what's needed for the greeting
+    const call = await twilioClient.calls.create({
+      url: greetingTwimlUrl,
+      to: to,
+      from: from,
+    });
+
+    // // Track the call in our store
+    callStore.trackCall(call.sid, {
+      from,
+      to,
+      direction: "outbound",
+      callType: "greeting",
+    });
+
+    console.log("Greeting call initiated:", call.sid);
+    return res.status(200).json({
+      success: true,
+      sid: call.sid,
+      message: "Greeting call initiated successfully",
+    });
+  } catch (error) {
+    console.error("Error making greeting call:", error.message);
+
+    // Handle specific Twilio errors
+    let message = error.message;
+    if (error.code) {
+      switch (error.code) {
+        case 21211:
+          message = "Invalid 'to' phone number format";
+          break;
+        case 21214:
+          message = "To phone number is not a valid or verified number";
+          break;
+        default:
+          message = `Twilio error (code: ${error.code}): ${error.message}`;
+      }
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: message,
+    });
+  }
+});
+
 app.post("/call/make", async (req, res) => {
   const { to, from, fromIdentity } = req.body;
 
@@ -829,6 +960,16 @@ app.post("/call/make", async (req, res) => {
   }
 
   try {
+    // Check for duplicate call attempt
+    if (!callDedupStore.checkAndAddCall(from, to)) {
+      console.log(`Rejecting duplicate call attempt from ${from} to ${to}`);
+      return res.status(429).json({
+        success: false,
+        error:
+          "A call to this number was just initiated. Please wait a moment before trying again.",
+      });
+    }
+
     // Use the backend_url from environment variable as the base for all webhook URLs
     // This ensures that Twilio can reach your server regardless of where the request comes from
     const twimlUrl = `${backend_url}/twiml`;
@@ -904,6 +1045,9 @@ app.post("/call/make", async (req, res) => {
 app.post("/call-status", (req, res) => {
   const callSid = req.body.CallSid;
   const callStatus = req.body.CallStatus;
+  console.log(
+    `[CALL STATUS] SID: ${req.body.CallSid} | Status: ${req.body.CallStatus}`
+  );
 
   console.log(`Call ${callSid} status update: ${callStatus}`);
   console.log("Call status details:", req.body);
@@ -962,6 +1106,74 @@ app.post("/call-action", (req, res) => {
   res.type("text/xml");
   res.send(voiceResponse.toString());
 });
+
+// Add a new route to handle simple greeting calls TwiML - support both GET and POST
+app.all("/twiml-greeting", (req, res) => {
+  console.log(
+    `Greeting TwiML endpoint called with ${req.method}:`,
+    req.body || req.query
+  );
+
+  try {
+    // Create a simple voice response
+    const voiceResponse = new twiml.VoiceResponse();
+
+    // Add a simple greeting message
+    voiceResponse.say("Hi, how can I help you today?");
+
+    // End the call after the greeting
+    voiceResponse.hangup();
+
+    // Log the generated TwiML for debugging
+    const twimlString = voiceResponse.toString();
+    console.log("Generated Greeting TwiML:", twimlString);
+
+    // Set content type and send response
+    res.type("text/xml");
+    res.send(twimlString);
+  } catch (error) {
+    console.error("Error in /twiml-greeting:", error);
+    const errorResponse = new twiml.VoiceResponse();
+    errorResponse.say(
+      "Sorry, there was a technical problem. Please try again later."
+    );
+    res.type("text/xml");
+    res.status(500).send(errorResponse.toString());
+  }
+});
+
+// Add a test endpoint to easily verify TwiML is working correctly
+app.get("/test-greeting-twiml", (req, res) => {
+  console.log("Test greeting TwiML endpoint called");
+
+  const voiceResponse = new twiml.VoiceResponse();
+  voiceResponse.say(
+    "This is a test greeting. If you see this, TwiML generation is working correctly."
+  );
+  voiceResponse.hangup();
+
+  // Send as both XML and in an HTML wrapper for easy browser testing
+  if (req.query.format === "xml") {
+    res.type("text/xml");
+    res.send(voiceResponse.toString());
+  } else {
+    res.send(`
+      <html>
+        <head><title>TwiML Test</title></head>
+        <body>
+          <h1>TwiML Test</h1>
+          <h2>Generated TwiML:</h2>
+          <pre>${voiceResponse
+            .toString()
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")}</pre>
+          <p>To see raw XML, add ?format=xml to the URL</p>
+        </body>
+      </html>
+    `);
+  }
+});
+
 // Add support for push notifications in React Native apps
 app.post("/register-push-notification", async (req, res) => {
   try {
