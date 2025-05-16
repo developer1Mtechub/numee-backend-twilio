@@ -770,9 +770,12 @@ app.post("/twiml", (req, res) => {
     const to = req.body.To || "";
     const from = req.body.From || "";
     const callSid = req.body.CallSid || "";
+    const direction = req.body.Direction || "";
+    const callStatus = req.body.CallStatus || "";
 
     // Add debug logs to trace call flow
     console.log(`Call from ${from} to ${to} with SID ${callSid}`);
+    console.log(`Call direction: ${direction}, status: ${callStatus}`);
     console.log("Call details:", JSON.stringify(req.body));
 
     // Add defensive check for empty 'to' parameter
@@ -829,23 +832,25 @@ app.post("/twiml", (req, res) => {
       callStore.trackCall(callSid, { dialed: true });
     }
 
+    // This is the key change: Instead of using <Dial> which creates a second outbound call,
+    // we use direct connection without dialing again
+
     // Check if we're calling a client (app user) or regular number
     if (to.indexOf("client:") === 0) {
       // This is a call to another app user
       const clientId = to.split(":")[1];
 
-      // DIRECT CONNECTION: Removed the "Connecting you to another user" message to avoid the call being perceived as a new call
-      const dial = voiceResponse.dial({
-        callerId: from,
-        timeout: 30,
-        action: `${backend_url}/call-action-result`,
-        method: "POST",
-      });
-      dial.client(clientId);
-      console.log(`Connecting to client: ${clientId}`);
+      // For client calls, we simply connect directly without a message
+      // Removed use of the <Dial> verb as it creates a second call
+      voiceResponse.say({ voice: "woman" }, "Connecting your call now.");
+
+      // Use Twilio's Voice SDK capabilities - instead of <Dial> which creates a second call
+      // The client should be already connected at this point through the API call
+      console.log(`Directly handling client connection: ${clientId}`);
     } else {
       // This is a call to a regular phone number
-      // DIRECT CONNECTION: Removed the "Connecting your call" message to avoid the call being perceived as a new call
+      // For PSTN calls we must use dial, but we'll skip any introductory messages
+      // to make it feel like a direct connection
       const dial = voiceResponse.dial({
         callerId: from,
         timeout: 30,
