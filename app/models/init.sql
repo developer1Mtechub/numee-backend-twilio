@@ -91,3 +91,27 @@ CREATE TABLE IF NOT EXISTS call_logs (
   ended_at timestamp,
   created_at timestamp DEFAULT NOW()
 );
+
+-- Table to log SMS message events
+CREATE TABLE IF NOT EXISTS message_logs (
+  id INT NOT NULL DEFAULT nextval('my_sequence') PRIMARY KEY,
+  message_sid VARCHAR(50) NOT NULL,  -- Twilio Message SID
+  from_number VARCHAR(20) NOT NULL,  -- Sender phone number
+  to_number VARCHAR(20) NOT NULL,    -- Recipient phone number
+  body TEXT,                         -- Message content
+  status VARCHAR(20) NOT NULL,       -- Message status (sent, delivered, received, failed, etc.)
+  direction VARCHAR(10) NOT NULL,    -- 'inbound' or 'outbound'
+  media_url TEXT,                    -- URLs of any media attached to the message (images, etc.)
+  read_at TIMESTAMP,                 -- When the message was read by the recipient (for inbound messages)
+  delivered_at TIMESTAMP,            -- When the message was delivered (based on Twilio webhook)
+  user_id INTEGER REFERENCES Users(id), -- Associated user ID
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),  -- When the message was sent or received
+  updated_at TIMESTAMP DEFAULT NOW()  -- Last update time (for status updates)
+);
+
+-- Indices for message_logs
+CREATE INDEX IF NOT EXISTS idx_message_logs_from_to ON message_logs(from_number, to_number);
+CREATE INDEX IF NOT EXISTS idx_message_logs_message_sid ON message_logs(message_sid);
+CREATE INDEX IF NOT EXISTS idx_message_logs_unread ON message_logs(to_number, direction, read_at) 
+WHERE read_at IS NULL AND direction = 'inbound';
+CREATE INDEX IF NOT EXISTS idx_message_logs_created_at ON message_logs(created_at);

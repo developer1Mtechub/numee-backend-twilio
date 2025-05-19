@@ -9,14 +9,21 @@ const pool = new Pool({
   // user: process.env.USER,
   // password: process.env.PASSWORD,
   // database: process.env.DATABASE
-  host: "testing-team-postgres.caprover.mtechub.org",
-  port: 5432,
-  user: "rimshariaz@mtechub.org",
-  password: "Mtechub@123",
-  // database: "cueballs",
-  // database: "cueball-phase2-staging",
-  database: "numee_staging",
+  // noty working
+  // host: "testing-team-postgres.caprover.mtechub.org",
+  // port: 5432,
+  // user: "rimshariaz@mtechub.org",
+  // password: "Mtechub@123",
+  // // database: "cueballs",
+  // // database: "cueball-phase2-staging",
+  // database: "numee_staging",
 
+  // max: 10,
+  host: "postgres-staging-projects.mtechub.com",
+  port: 5432,
+  user: "lone_user",
+  password: "mtechub123",
+  database: "staging-numee",
   max: 10,
 });
 

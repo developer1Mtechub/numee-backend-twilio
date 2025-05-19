@@ -297,6 +297,8 @@ const apiKey = process.env.TWILIO_API_KEY;
 const apiSecret = process.env.TWILIO_API_SECRET;
 const appSid = process.env.TWILIO_APP_SID;
 const callerId = process.env.TWILIO_CALLER_ID;
+const messagingNumber =
+  process.env.TWILIO_MESSAGING_NUMBER || process.env.TWILIO_CALLER_ID; // Use the caller ID as the SMS number if no specific messaging number is set
 
 // Configure CORS properly - place this before any routes
 // This will handle OPTIONS preflight and set proper headers for all routes
@@ -321,6 +323,7 @@ app.use(bodyParser.urlencoded({ limit: "50mb", extended: true }));
 app.use("/call/incoming", bodyParser.urlencoded({ extended: false }));
 app.use("/twiml", bodyParser.urlencoded({ extended: false }));
 app.use("/call-action", bodyParser.urlencoded({ extended: false }));
+app.use("/message/webhook", bodyParser.urlencoded({ extended: false })); // Middleware for SMS webhook
 
 // Add middleware to ensure proper JSON handling for API routes
 // app.use('/token', (req, res, next) => {
@@ -1551,11 +1554,508 @@ app.post("/sync-purchased-number", async (req, res) => {
   }
 });
 
+// =============================================
+// SMS Messaging API Endpoints
+// =============================================
+
+// Endpoint to send an SMS message
+app.post("/message/send", async (req, res) => {
+  const { to, body, from, mediaUrl } = req.body;
+
+  if (!to || !body) {
+    return res.status(400).json({
+      success: false,
+      error: "Missing required parameters: 'to' and 'body' are required",
+    });
+  }
+
+  // Use the provided 'from' number or default to the environment variable
+  const fromNumber = from || messagingNumber;
+
+  if (!fromNumber) {
+    return res.status(400).json({
+      success: false,
+      error:
+        "No 'from' number provided and no default messaging number configured",
+    });
+  }
+
+  try {
+    console.log(`Sending message from ${fromNumber} to ${to}`);
+
+    // Create message options
+    const messageOptions = {
+      to: to,
+      from: fromNumber,
+      body: body,
+    };
+
+    // Add media URL if provided
+    if (mediaUrl) {
+      messageOptions.mediaUrl = mediaUrl;
+    }
+
+    // Send the message
+    const message = await twilioClient.messages.create(messageOptions);
+
+    console.log(`Message sent with SID: ${message.sid}`);
+
+    // Store message in database
+    try {
+      const client = await pool.connect();
+      try {
+        const userQuery = await client.query(
+          `SELECT user_id FROM twilio_number_mapping WHERE twilio_number = $1`,
+          [fromNumber]
+        );
+
+        const userId =
+          userQuery.rows.length > 0 ? userQuery.rows[0].user_id : null;
+
+        await client.query(
+          `INSERT INTO message_logs 
+           (message_sid, from_number, to_number, body, status, direction, media_url, user_id, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
+          [
+            message.sid,
+            fromNumber,
+            to,
+            body,
+            message.status,
+            "outbound",
+            mediaUrl || null,
+            userId,
+          ]
+        );
+        console.log(`Message ${message.sid} logged to database`);
+      } finally {
+        client.release();
+      }
+    } catch (dbError) {
+      console.error("Database error logging message:", dbError);
+      // Continue even if database logging fails
+    }
+
+    return res.status(200).json({
+      success: true,
+      sid: message.sid,
+      status: message.status,
+      message: "Message sent successfully",
+    });
+  } catch (error) {
+    console.error("Error sending message:", error);
+
+    // Handle specific Twilio error codes
+    let errorMessage = error.message;
+    if (error.code) {
+      switch (error.code) {
+        case 21211:
+          errorMessage = "Invalid 'to' phone number format";
+          break;
+        case 21214:
+          errorMessage =
+            "The 'to' phone number is not a valid or verified number";
+          break;
+        case 21606:
+          errorMessage =
+            "The 'from' number is not a valid Twilio number for messaging";
+          break;
+        default:
+          errorMessage = `Twilio error (code: ${error.code}): ${error.message}`;
+      }
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: errorMessage,
+    });
+  }
+});
+
+// Endpoint to receive SMS webhook callbacks from Twilio
+app.post("/message/webhook", async (req, res) => {
+  try {
+    console.log("Incoming message webhook received:", req.body);
+
+    // Extract message details
+    const messageSid = req.body.MessageSid;
+    const from = req.body.From;
+    const to = req.body.To;
+    const body = req.body.Body;
+    const numMedia = parseInt(req.body.NumMedia || "0", 10);
+
+    // Array to hold media URLs if any
+    const mediaUrls = [];
+
+    // Extract media if present
+    for (let i = 0; i < numMedia; i++) {
+      const mediaUrl = req.body[`MediaUrl${i}`];
+      const contentType = req.body[`MediaContentType${i}`];
+      if (mediaUrl) {
+        mediaUrls.push({
+          url: mediaUrl,
+          contentType: contentType,
+        });
+      }
+    }
+
+    // Log the incoming message to database
+    let targetUserId = null;
+    let targetEmail = null;
+
+    try {
+      const client = await pool.connect();
+      try {
+        // Find user associated with the Twilio number
+        const numberLookupQuery = await client.query(
+          `SELECT user_id, email FROM twilio_number_mapping WHERE twilio_number = $1 AND is_active = true`,
+          [to]
+        );
+
+        if (numberLookupQuery.rows.length > 0) {
+          targetUserId = numberLookupQuery.rows[0].user_id;
+          targetEmail = numberLookupQuery.rows[0].email;
+          console.log(
+            `Found user ID ${targetUserId} with email ${targetEmail} for Twilio number ${to}`
+          );
+        }
+
+        // Insert the message into the database
+        await client.query(
+          `INSERT INTO message_logs 
+           (message_sid, from_number, to_number, body, status, direction, media_url, user_id, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
+          [
+            messageSid,
+            from,
+            to,
+            body,
+            "received",
+            "inbound",
+            mediaUrls.length > 0 ? JSON.stringify(mediaUrls) : null,
+            targetUserId,
+          ]
+        );
+        console.log(`Incoming message ${messageSid} logged to database`);
+
+        // Send push notification to user if we have a user ID
+        if (targetUserId) {
+          try {
+            // Get user's FCM tokens
+            const userTokens = fcmTokenStore.getTokens(targetUserId);
+
+            if (userTokens && userTokens.length > 0) {
+              console.log(
+                `Sending push notification to user ${targetUserId} for incoming message`
+              );
+
+              // Send to all user devices
+              for (const tokenData of userTokens) {
+                try {
+                  const message = {
+                    token: tokenData.token,
+                    notification: {
+                      title: "New Message",
+                      body: `Message from ${from}: ${body.substring(0, 100)}${
+                        body.length > 100 ? "..." : ""
+                      }`,
+                    },
+                    data: {
+                      type: "incomingMessage",
+                      from: from,
+                      messageSid: messageSid,
+                      timestamp: new Date().toISOString(),
+                    },
+                    android: {
+                      priority: "high",
+                      notification: {
+                        sound: "default",
+                      },
+                    },
+                    apns: {
+                      payload: {
+                        aps: {
+                          sound: "default",
+                        },
+                      },
+                    },
+                  };
+
+                  await admin.messaging().send(message);
+                  console.log(
+                    `Push notification sent to device: ${tokenData.token.substring(
+                      0,
+                      10
+                    )}...`
+                  );
+                } catch (fcmError) {
+                  console.error("Error sending FCM notification:", fcmError);
+                }
+              }
+            }
+          } catch (notificationError) {
+            console.error(
+              "Error sending push notification for incoming message:",
+              notificationError
+            );
+          }
+        }
+      } finally {
+        client.release();
+      }
+    } catch (dbError) {
+      console.error("Database error logging incoming message:", dbError);
+    }
+
+    // Send an acknowledgment response
+    res.status(200).send("OK");
+  } catch (error) {
+    console.error("Error handling incoming message webhook:", error);
+    res.status(500).send("Error");
+  }
+});
+
+// Endpoint to retrieve message history for a user
+app.get("/message/history", async (req, res) => {
+  // Query parameters: userId (required), phoneNumber (optional), limit (optional), offset (optional)
+  const { userId, phoneNumber, limit = 50, offset = 0 } = req.query;
+
+  if (!userId) {
+    return res.status(400).json({
+      success: false,
+      error: "Missing required parameter: userId",
+    });
+  }
+
+  try {
+    const client = await pool.connect();
+    try {
+      let query, params;
+
+      if (phoneNumber) {
+        // Get messages between this user and a specific phone number
+        query = `
+          SELECT ml.*, 
+                 CASE WHEN ml.direction = 'outbound' THEN true ELSE false END AS is_from_me,
+                 tnm.friendly_name AS contact_name
+          FROM message_logs ml
+          LEFT JOIN twilio_number_mapping tnm ON 
+            (ml.direction = 'inbound' AND ml.from_number = $2) OR 
+            (ml.direction = 'outbound' AND ml.to_number = $2)
+          WHERE ml.user_id = $1 AND 
+                ((ml.from_number = $2) OR (ml.to_number = $2))
+          ORDER BY ml.created_at DESC
+          LIMIT $3 OFFSET $4
+        `;
+        params = [userId, phoneNumber, limit, offset];
+      } else {
+        // Get all messages for this user
+        query = `
+          SELECT ml.*, 
+                 CASE WHEN ml.direction = 'outbound' THEN true ELSE false END AS is_from_me,
+                 tnm.friendly_name AS contact_name
+          FROM message_logs ml
+          LEFT JOIN twilio_number_mapping tnm ON 
+            (ml.direction = 'inbound' AND ml.from_number = tnm.twilio_number) OR 
+            (ml.direction = 'outbound' AND ml.to_number = tnm.twilio_number)
+          WHERE ml.user_id = $1
+          ORDER BY ml.created_at DESC
+          LIMIT $2 OFFSET $3
+        `;
+        params = [userId, limit, offset];
+      }
+
+      const result = await client.query(query, params);
+
+      // Count total messages for pagination
+      const countQuery = phoneNumber
+        ? `SELECT COUNT(*) FROM message_logs WHERE user_id = $1 AND ((from_number = $2) OR (to_number = $2))`
+        : `SELECT COUNT(*) FROM message_logs WHERE user_id = $1`;
+
+      const countParams = phoneNumber ? [userId, phoneNumber] : [userId];
+      const countResult = await client.query(countQuery, countParams);
+      const totalCount = parseInt(countResult.rows[0].count, 10);
+
+      return res.status(200).json({
+        success: true,
+        count: result.rows.length,
+        messages: result.rows,
+        pagination: {
+          limit: parseInt(limit, 10),
+          offset: parseInt(offset, 10),
+          total: totalCount,
+          hasMore: parseInt(offset, 10) + result.rows.length < totalCount,
+        },
+      });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error("Error retrieving message history:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to retrieve message history: " + error.message,
+    });
+  }
+});
+
+// Endpoint to check if a user has any unread messages
+app.get("/message/unread/:userId", async (req, res) => {
+  const { userId } = req.params;
+
+  if (!userId) {
+    return res.status(400).json({
+      success: false,
+      error: "Missing required parameter: userId",
+    });
+  }
+
+  try {
+    const client = await pool.connect();
+    try {
+      // Count unread messages for this user
+      const query = `
+        SELECT COUNT(*) as unread_count,
+               array_agg(distinct from_number) as from_numbers
+        FROM message_logs
+        WHERE user_id = $1 AND read_at IS NULL AND direction = 'inbound'
+      `;
+
+      const result = await client.query(query, [userId]);
+      const unreadCount = parseInt(result.rows[0].unread_count, 10);
+      const fromNumbers = result.rows[0].from_numbers || [];
+
+      return res.status(200).json({
+        success: true,
+        unreadCount,
+        hasUnread: unreadCount > 0,
+        fromNumbers: unreadCount > 0 ? fromNumbers : [],
+      });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error("Error checking unread messages:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to check unread messages: " + error.message,
+    });
+  }
+});
+
+// Endpoint to mark messages as read
+app.post("/message/mark-read", async (req, res) => {
+  const { messageIds, userId, fromNumber } = req.body;
+
+  try {
+    const client = await pool.connect();
+    try {
+      let updateResult;
+
+      if (messageIds && messageIds.length > 0) {
+        // Mark specific messages as read
+        updateResult = await client.query(
+          `UPDATE message_logs
+           SET read_at = NOW(), updated_at = NOW()
+           WHERE message_sid = ANY($1) AND read_at IS NULL
+           RETURNING message_sid`,
+          [messageIds]
+        );
+      } else if (userId && fromNumber) {
+        // Mark all messages from a specific number to this user as read
+        updateResult = await client.query(
+          `UPDATE message_logs
+           SET read_at = NOW(), updated_at = NOW()
+           WHERE user_id = $1 AND from_number = $2 AND read_at IS NULL AND direction = 'inbound'
+           RETURNING message_sid`,
+          [userId, fromNumber]
+        );
+      } else if (userId) {
+        // Mark all messages for this user as read
+        updateResult = await client.query(
+          `UPDATE message_logs
+           SET read_at = NOW(), updated_at = NOW()
+           WHERE user_id = $1 AND read_at IS NULL AND direction = 'inbound'
+           RETURNING message_sid`,
+          [userId]
+        );
+      } else {
+        return res.status(400).json({
+          success: false,
+          error:
+            "Missing required parameters: either messageIds, userId, or both userId and fromNumber are required",
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        markedCount: updateResult.rows.length,
+        messageIds: updateResult.rows.map((row) => row.message_sid),
+      });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error("Error marking messages as read:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to mark messages as read: " + error.message,
+    });
+  }
+});
+
+// Endpoint to get message status updates
+app.post("/message/status", async (req, res) => {
+  try {
+    console.log("Message status update webhook received:", req.body);
+
+    const messageSid = req.body.MessageSid;
+    const messageStatus = req.body.MessageStatus;
+
+    if (!messageSid || !messageStatus) {
+      return res.status(400).send("Missing MessageSid or MessageStatus");
+    }
+
+    try {
+      const client = await pool.connect();
+      try {
+        // Update message status in the database
+        await client.query(
+          `UPDATE message_logs
+           SET status = $1, updated_at = NOW(), 
+               delivered_at = CASE WHEN $1 = 'delivered' THEN NOW() ELSE delivered_at END
+           WHERE message_sid = $2`,
+          [messageStatus, messageSid]
+        );
+
+        console.log(
+          `Updated status of message ${messageSid} to ${messageStatus}`
+        );
+      } finally {
+        client.release();
+      }
+    } catch (dbError) {
+      console.error("Database error updating message status:", dbError);
+    }
+
+    res.status(200).send("OK");
+  } catch (error) {
+    console.error("Error handling message status webhook:", error);
+    res.status(500).send("Error");
+  }
+});
+
+// =============================================
+// End of SMS Messaging API Endpoints
+// =============================================
+
 app.all("/*", (req, res, next) => {
   // Check if this is a Twilio request by looking for common Twilio parameters
   const isTwilioRequest =
-    (req.body && (req.body.CallSid || req.body.AccountSid)) ||
-    (req.query && (req.query.CallSid || req.query.AccountSid));
+    (req.body &&
+      (req.body.CallSid || req.body.MessageSid || req.body.AccountSid)) ||
+    (req.query &&
+      (req.query.CallSid || req.query.MessageSid || req.query.AccountSid));
 
   if (isTwilioRequest) {
     console.log(
