@@ -27,17 +27,7 @@ CREATE TABLE IF NOT EXISTS images (
   description TEXT
 );
 
-CREATE TABLE IF NOT EXISTS user_numbers (
-  id INT NOT NULL DEFAULT nextval('my_sequence') PRIMARY KEY, 
-  user_id INTEGER REFERENCES Users(id),
-  number VARCHAR(255),
-  country VARCHAR(255),
-  number_type VARCHAR(255),
-  capabilities TEXT,
-  price DECIMAL,
-  created_at timestamp DEFAULT NOW(),
-  updated_at timestamp DEFAULT NOW()
-); 
+
 
 CREATE TABLE IF NOT EXISTS subscriptions (
   id INT NOT NULL DEFAULT nextval('my_sequence') PRIMARY KEY, 

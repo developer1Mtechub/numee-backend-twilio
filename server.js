@@ -1588,12 +1588,18 @@ app.post("/message/send", async (req, res) => {
       to: to,
       from: fromNumber,
       body: body,
+      statusCallback: `${backend_url}/message/status`, // Add status callback URL
     };
 
     // Add media URL if provided
     if (mediaUrl) {
       messageOptions.mediaUrl = mediaUrl;
     }
+
+    console.log(`Message options:`, {
+      ...messageOptions,
+      statusCallback: messageOptions.statusCallback,
+    });
 
     // Send the message
     const message = await twilioClient.messages.create(messageOptions);
@@ -1816,9 +1822,15 @@ app.post("/message/webhook", async (req, res) => {
 });
 
 // Endpoint to retrieve message history for a user
-app.get("/message/history", async (req, res) => {
+app.post("/message/history", async (req, res) => {
   // Query parameters: userId (required), phoneNumber (optional), limit (optional), offset (optional)
-  const { userId, phoneNumber, limit = 50, offset = 0 } = req.query;
+  const { userId, phoneNumber, limit = 50, offset = 0 } = req.body;
+  console.log("Received request for message history with params:", {
+    userId,
+    phoneNumber,
+    limit,
+    offset,
+  });
 
   if (!userId) {
     return res.status(400).json({
@@ -1835,23 +1847,23 @@ app.get("/message/history", async (req, res) => {
       if (phoneNumber) {
         // Get messages between this user and a specific phone number
         query = `
-          SELECT ml.*, 
+          SELECT DISTINCT ON (ml.id) ml.*, 
                  CASE WHEN ml.direction = 'outbound' THEN true ELSE false END AS is_from_me,
                  tnm.friendly_name AS contact_name
           FROM message_logs ml
           LEFT JOIN twilio_number_mapping tnm ON 
-            (ml.direction = 'inbound' AND ml.from_number = $2) OR 
-            (ml.direction = 'outbound' AND ml.to_number = $2)
+            (ml.direction = 'inbound' AND ml.from_number = tnm.twilio_number) OR 
+            (ml.direction = 'outbound' AND ml.to_number = tnm.twilio_number)
           WHERE ml.user_id = $1 AND 
                 ((ml.from_number = $2) OR (ml.to_number = $2))
-          ORDER BY ml.created_at DESC
+          ORDER BY ml.id, ml.created_at DESC
           LIMIT $3 OFFSET $4
         `;
         params = [userId, phoneNumber, limit, offset];
       } else {
         // Get all messages for this user
         query = `
-          SELECT ml.*, 
+          SELECT DISTINCT ON (ml.id) ml.*, 
                  CASE WHEN ml.direction = 'outbound' THEN true ELSE false END AS is_from_me,
                  tnm.friendly_name AS contact_name
           FROM message_logs ml
@@ -1859,13 +1871,18 @@ app.get("/message/history", async (req, res) => {
             (ml.direction = 'inbound' AND ml.from_number = tnm.twilio_number) OR 
             (ml.direction = 'outbound' AND ml.to_number = tnm.twilio_number)
           WHERE ml.user_id = $1
-          ORDER BY ml.created_at DESC
+          ORDER BY ml.id, ml.created_at DESC
           LIMIT $2 OFFSET $3
         `;
         params = [userId, limit, offset];
       }
 
       const result = await client.query(query, params);
+      console.log(
+        `Message history query executed. Found ${result.rows.length} messages.`
+      );
+      console.log("Query:", query);
+      console.log("Params:", params);
 
       // Count total messages for pagination
       const countQuery = phoneNumber
@@ -1875,6 +1892,20 @@ app.get("/message/history", async (req, res) => {
       const countParams = phoneNumber ? [userId, phoneNumber] : [userId];
       const countResult = await client.query(countQuery, countParams);
       const totalCount = parseInt(countResult.rows[0].count, 10);
+
+      // Additional check for empty results
+      if (result.rows.length === 0) {
+        console.log("No messages found. Checking if user exists...");
+        const userCheck = await client.query(
+          `SELECT id FROM Users WHERE id = $1`,
+          [userId]
+        );
+        if (userCheck.rows.length === 0) {
+          console.log(`No user found with ID ${userId}`);
+        } else {
+          console.log(`User with ID ${userId} exists but has no messages`);
+        }
+      }
 
       return res.status(200).json({
         success: true,
@@ -1902,7 +1933,7 @@ app.get("/message/history", async (req, res) => {
 // Endpoint to check if a user has any unread messages
 app.get("/message/unread/:userId", async (req, res) => {
   const { userId } = req.params;
-
+  console.log("Checking unread messages for user:", userId);
   if (!userId) {
     return res.status(400).json({
       success: false,
@@ -1913,23 +1944,171 @@ app.get("/message/unread/:userId", async (req, res) => {
   try {
     const client = await pool.connect();
     try {
-      // Count unread messages for this user
-      const query = `
-        SELECT COUNT(*) as unread_count,
-               array_agg(distinct from_number) as from_numbers
+      // First check if we have any messages for this user at all
+      const checkMessagesQuery = `
+        SELECT COUNT(*) as total_count
         FROM message_logs
-        WHERE user_id = $1 AND read_at IS NULL AND direction = 'inbound'
+        WHERE user_id = $1
+      `;
+
+      const checkResult = await client.query(checkMessagesQuery, [userId]);
+      const totalMessages = parseInt(checkResult.rows[0].total_count, 10);
+      console.log(`Total messages for user ${userId}: ${totalMessages}`);
+
+      // Check if there are any messages with 'inbound' direction for this user
+      const inboundCheckQuery = `
+        SELECT COUNT(*) as inbound_count
+        FROM message_logs
+        WHERE user_id = $1
+      `;
+
+      const inboundResult = await client.query(inboundCheckQuery, [userId]);
+      const inboundCount = parseInt(inboundResult.rows[0].inbound_count, 10);
+      console.log(`Inbound messages for user ${userId}: ${inboundCount}`);
+
+      // Now check for any unread messages regardless of direction (for debugging)
+      const allUnreadQuery = `
+        SELECT COUNT(*) as all_unread_count
+        FROM message_logs
+        WHERE user_id = $1 AND read_at IS NULL
+      `;
+
+      const allUnreadResult = await client.query(allUnreadQuery, [userId]);
+      const allUnreadCount = parseInt(
+        allUnreadResult.rows[0].all_unread_count,
+        10
+      );
+      console.log(`All unread messages for user ${userId}: ${allUnreadCount}`);
+
+      // Now check specifically for unread messages based on from/to relationships, not direction
+      const query = `
+        WITH user_numbers AS (
+          SELECT twilio_number FROM twilio_number_mapping WHERE user_id = $1
+        )
+        SELECT 
+          COUNT(*) as unread_count,
+          COALESCE(array_agg(distinct from_number) FILTER (WHERE from_number IS NOT NULL), ARRAY[]::text[]) as from_numbers,
+          COALESCE(json_agg(
+            json_build_object(
+              'id', id,
+              'message_sid', message_sid,
+              'from_number', from_number,
+              'to_number', to_number,
+              'body', body,
+              'status', status,
+              'direction', direction,
+              'created_at', created_at
+            )
+          ) FILTER (WHERE id IS NOT NULL), '[]'::json) as message_details
+        FROM message_logs ml
+        WHERE ml.user_id = $1 
+          AND ml.read_at IS NULL
+          AND ml.to_number IN (SELECT twilio_number FROM user_numbers)
+          AND ml.from_number NOT IN (SELECT twilio_number FROM user_numbers)
       `;
 
       const result = await client.query(query, [userId]);
+      console.log(`Unread messages query result:`, result.rows[0]);
       const unreadCount = parseInt(result.rows[0].unread_count, 10);
       const fromNumbers = result.rows[0].from_numbers || [];
+      const messageDetails = result.rows[0].message_details || [];
 
+      // Debug info for user's phone numbers
+      const userNumbersQuery = `
+        SELECT twilio_number, friendly_name 
+        FROM twilio_number_mapping 
+        WHERE user_id = $1
+      `;
+      const userNumbersResult = await client.query(userNumbersQuery, [userId]);
+      console.log(`Numbers owned by user ${userId}:`, userNumbersResult.rows);
+
+      // Get details about senders by grouping messages
+      const groupedMessagesQuery = `
+        WITH user_numbers AS (
+          SELECT twilio_number FROM twilio_number_mapping WHERE user_id = $1
+        )
+        SELECT 
+          from_number, 
+          COUNT(*) as message_count,
+          MIN(created_at) as first_message_time,
+          MAX(created_at) as latest_message_time,
+          json_agg(
+            json_build_object(
+              'id', id,
+              'message_sid', message_sid,
+              'body', body, 
+              'created_at', created_at,
+              'status', status,
+              'direction', direction,
+              'from_number', from_number,
+              'to_number', to_number
+            ) ORDER BY created_at DESC
+          ) as messages
+        FROM message_logs ml
+        WHERE ml.user_id = $1 
+          AND ml.read_at IS NULL
+          AND ml.to_number IN (SELECT twilio_number FROM twilio_number_mapping)
+          AND ml.from_number NOT IN (SELECT twilio_number FROM twilio_number_mapping)
+        GROUP BY from_number
+        ORDER BY latest_message_time DESC
+      `;
+
+      const groupedResult = await client.query(groupedMessagesQuery, [userId]);
+      const messageBySender = groupedResult.rows;
+
+      // Debug the actual data in the table
+      const debugQuery = `
+        SELECT id, message_sid, from_number, to_number, direction, read_at, user_id, status, created_at, body
+        FROM message_logs
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+        LIMIT 20
+      `;
+
+      const debugResult = await client.query(debugQuery, [userId]);
+      console.log(
+        `Debug - Sample messages for user ${userId}:`,
+        debugResult.rows
+      );
+
+      // Try to attach friendly names to the senders
+      const lookupNumbersQuery = `
+        SELECT twilio_number, friendly_name
+        FROM twilio_number_mapping
+        WHERE twilio_number = ANY($1)
+      `;
+
+      const lookupResult = await client.query(lookupNumbersQuery, [
+        fromNumbers,
+      ]);
+      const friendlyNames = {};
+
+      // Create a map of phone numbers to friendly names
+      lookupResult.rows.forEach((row) => {
+        friendlyNames[row.twilio_number] =
+          row.friendly_name || row.twilio_number;
+      });
+
+      // Add friendly names to the grouped message data
+      messageBySender.forEach((sender) => {
+        sender.friendly_name =
+          friendlyNames[sender.from_number] || sender.from_number;
+        // Add a preview of the latest message
+        if (sender.messages && sender.messages.length > 0) {
+          sender.latest_message = sender.messages[0].body;
+          sender.latest_timestamp = sender.messages[0].created_at;
+        }
+      });
+
+      // Return both inbound unread count and total unread count with detailed message information
       return res.status(200).json({
         success: true,
-        unreadCount,
-        hasUnread: unreadCount > 0,
-        fromNumbers: unreadCount > 0 ? fromNumbers : [],
+        unreadCount: unreadCount, // This is just inbound unread messages
+        totalUnreadCount: allUnreadCount, // This is ALL unread messages regardless of direction
+        hasUnread: allUnreadCount > 0, // Change to use total unread count
+        fromNumbers: fromNumbers, // Always return the array, even if empty
+        messageDetails: messageDetails, // Include detailed message information
+        messageBySender: messageBySender, // Messages grouped by sender with counts and timestamps
       });
     } finally {
       client.release();
@@ -1945,52 +2124,104 @@ app.get("/message/unread/:userId", async (req, res) => {
 
 // Endpoint to mark messages as read
 app.post("/message/mark-read", async (req, res) => {
-  const { messageIds, userId, fromNumber } = req.body;
+  const { messageIds, userId, fromNumber, messageId } = req.body;
 
   try {
     const client = await pool.connect();
     try {
       let updateResult;
 
-      if (messageIds && messageIds.length > 0) {
-        // Mark specific messages as read
+      console.log(`Marking messages as read with params:`, req.body);
+
+      if (messageId) {
+        // Mark a single message as read by its database ID (not SID)
+        updateResult = await client.query(
+          `UPDATE message_logs
+           SET read_at = NOW(), updated_at = NOW()
+           WHERE id = $1 AND read_at IS NULL
+           RETURNING id, message_sid, from_number, to_number`,
+          [messageId]
+        );
+        console.log(`Marked message ${messageId} as read`);
+      } else if (messageIds && messageIds.length > 0) {
+        // Mark specific messages as read by SID
         updateResult = await client.query(
           `UPDATE message_logs
            SET read_at = NOW(), updated_at = NOW()
            WHERE message_sid = ANY($1) AND read_at IS NULL
-           RETURNING message_sid`,
+           RETURNING id, message_sid, from_number, to_number`,
           [messageIds]
+        );
+        console.log(
+          `Marked ${updateResult.rows.length} messages as read by SID`
         );
       } else if (userId && fromNumber) {
         // Mark all messages from a specific number to this user as read
         updateResult = await client.query(
-          `UPDATE message_logs
+          `WITH user_numbers AS (
+             SELECT twilio_number FROM twilio_number_mapping WHERE user_id = $1
+           )
+           UPDATE message_logs
            SET read_at = NOW(), updated_at = NOW()
-           WHERE user_id = $1 AND from_number = $2 AND read_at IS NULL AND direction = 'inbound'
-           RETURNING message_sid`,
+           WHERE user_id = $1 
+             AND from_number = $2 
+             AND read_at IS NULL
+             AND to_number IN (SELECT twilio_number FROM user_numbers)
+             AND from_number NOT IN (SELECT twilio_number FROM user_numbers)
+           RETURNING id, message_sid, from_number, to_number`,
           [userId, fromNumber]
+        );
+        console.log(
+          `Marked ${updateResult.rows.length} messages from ${fromNumber} as read for user ${userId}`
         );
       } else if (userId) {
         // Mark all messages for this user as read
         updateResult = await client.query(
-          `UPDATE message_logs
+          `WITH user_numbers AS (
+             SELECT twilio_number FROM twilio_number_mapping WHERE user_id = $1
+           )
+           UPDATE message_logs
            SET read_at = NOW(), updated_at = NOW()
-           WHERE user_id = $1 AND read_at IS NULL AND direction = 'inbound'
-           RETURNING message_sid`,
+           WHERE user_id = $1 
+             AND read_at IS NULL
+             AND to_number IN (SELECT twilio_number FROM user_numbers)
+             AND from_number NOT IN (SELECT twilio_number FROM user_numbers)
+           RETURNING id, message_sid, from_number, to_number`,
           [userId]
+        );
+        console.log(
+          `Marked all ${updateResult.rows.length} unread messages as read for user ${userId}`
         );
       } else {
         return res.status(400).json({
           success: false,
           error:
-            "Missing required parameters: either messageIds, userId, or both userId and fromNumber are required",
+            "Missing required parameters: either messageId, messageIds, userId, or both userId and fromNumber are required",
         });
+      }
+
+      // Get the remaining unread count after marking messages as read
+      let remainingUnreadCount = 0;
+      if (userId) {
+        const countResult = await client.query(
+          `WITH user_numbers AS (
+             SELECT twilio_number FROM twilio_number_mapping WHERE user_id = $1
+           )
+           SELECT COUNT(*) as count FROM message_logs 
+           WHERE user_id = $1 
+             AND read_at IS NULL
+             AND to_number IN (SELECT twilio_number FROM user_numbers)
+             AND from_number NOT IN (SELECT twilio_number FROM user_numbers)`,
+          [userId]
+        );
+        remainingUnreadCount = parseInt(countResult.rows[0].count, 10);
       }
 
       return res.status(200).json({
         success: true,
         markedCount: updateResult.rows.length,
-        messageIds: updateResult.rows.map((row) => row.message_sid),
+        markedMessages: updateResult.rows,
+        remainingUnreadCount: remainingUnreadCount,
       });
     } finally {
       client.release();
@@ -2007,30 +2238,103 @@ app.post("/message/mark-read", async (req, res) => {
 // Endpoint to get message status updates
 app.post("/message/status", async (req, res) => {
   try {
-    console.log("Message status update webhook received:", req.body);
+    console.log(
+      "Message status update webhook received:",
+      JSON.stringify(req.body, null, 2)
+    );
 
     const messageSid = req.body.MessageSid;
     const messageStatus = req.body.MessageStatus;
+    const errorCode = req.body.ErrorCode;
+    const errorMessage = req.body.ErrorMessage;
 
     if (!messageSid || !messageStatus) {
       return res.status(400).send("Missing MessageSid or MessageStatus");
     }
 
+    // Log detailed information about the status update
+    console.log(
+      `STATUS UPDATE: Message ${messageSid} status changed to ${messageStatus}`
+    );
+    if (errorCode) {
+      console.log(
+        `ERROR DETAILS: Code: ${errorCode}, Message: ${errorMessage}`
+      );
+    }
+
     try {
       const client = await pool.connect();
       try {
-        // Update message status in the database
-        await client.query(
-          `UPDATE message_logs
-           SET status = $1, updated_at = NOW(), 
-               delivered_at = CASE WHEN $1 = 'delivered' THEN NOW() ELSE delivered_at END
-           WHERE message_sid = $2`,
-          [messageStatus, messageSid]
+        // Check if the message_logs table has the error columns
+        try {
+          // Check if error_code and error_message columns exist, add them if they don't
+          const checkColumnsQuery = `
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'message_logs' AND column_name IN ('error_code', 'error_message')
+          `;
+
+          const columnsResult = await client.query(checkColumnsQuery);
+          const existingColumns = columnsResult.rows.map(
+            (row) => row.column_name
+          );
+
+          if (!existingColumns.includes("error_code")) {
+            console.log("Adding error_code column to message_logs table");
+            await client.query(
+              `ALTER TABLE message_logs ADD COLUMN error_code VARCHAR(50)`
+            );
+          }
+
+          if (!existingColumns.includes("error_message")) {
+            console.log("Adding error_message column to message_logs table");
+            await client.query(
+              `ALTER TABLE message_logs ADD COLUMN error_message TEXT`
+            );
+          }
+        } catch (alterError) {
+          console.error("Error checking or adding columns:", alterError);
+          // Continue anyway - we'll try to update without the columns if needed
+        }
+
+        // Get current status for comparison
+        const currentStatusResult = await client.query(
+          `SELECT status FROM message_logs WHERE message_sid = $1`,
+          [messageSid]
         );
 
-        console.log(
-          `Updated status of message ${messageSid} to ${messageStatus}`
+        const currentStatus =
+          currentStatusResult.rows.length > 0
+            ? currentStatusResult.rows[0].status
+            : "unknown";
+
+        // Update message status in the database
+        const updateResult = await client.query(
+          `UPDATE message_logs
+           SET status = $1, 
+               updated_at = NOW(), 
+               delivered_at = CASE WHEN $1 = 'delivered' THEN NOW() ELSE delivered_at END,
+               error_code = $3,
+               error_message = $4
+           WHERE message_sid = $2
+           RETURNING *`,
+          [messageStatus, messageSid, errorCode || null, errorMessage || null]
         );
+
+        if (updateResult.rows.length > 0) {
+          console.log(
+            `Updated status of message ${messageSid} from ${currentStatus} to ${messageStatus}`
+          );
+
+          // If there's an error message, log it clearly
+          if (errorCode) {
+            console.log(
+              `Error details saved: Code ${errorCode}: ${errorMessage}`
+            );
+          }
+        } else {
+          console.log(`No message found with SID ${messageSid} in database`);
+        }
       } finally {
         client.release();
       }
