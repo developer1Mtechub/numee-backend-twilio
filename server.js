@@ -1959,7 +1959,7 @@ app.get("/message/unread/:userId", async (req, res) => {
       const inboundCheckQuery = `
         SELECT COUNT(*) as inbound_count
         FROM message_logs
-        WHERE user_id = $1
+        WHERE user_id = $1 AND direction = 'inbound'
       `;
 
       const inboundResult = await client.query(inboundCheckQuery, [userId]);
@@ -1980,7 +1980,7 @@ app.get("/message/unread/:userId", async (req, res) => {
       );
       console.log(`All unread messages for user ${userId}: ${allUnreadCount}`);
 
-      // Now check specifically for unread messages based on from/to relationships, not direction
+      // Now check specifically for unread messages based on from/to relationships, not just direction
       const query = `
         WITH user_numbers AS (
           SELECT twilio_number FROM twilio_number_mapping WHERE user_id = $1
@@ -2003,8 +2003,15 @@ app.get("/message/unread/:userId", async (req, res) => {
         FROM message_logs ml
         WHERE ml.user_id = $1 
           AND ml.read_at IS NULL
-          AND ml.to_number IN (SELECT twilio_number FROM user_numbers)
-          AND ml.from_number NOT IN (SELECT twilio_number FROM user_numbers)
+          AND (
+            -- This handles inbound messages to the user (messages sent TO user's numbers)
+            (ml.to_number IN (SELECT twilio_number FROM user_numbers) 
+             AND ml.from_number NOT IN (SELECT twilio_number FROM user_numbers))
+            OR 
+            -- This handles outbound messages from the user that are unread
+            (ml.from_number IN (SELECT twilio_number FROM user_numbers)
+             AND ml.direction = 'outbound')
+          )
       `;
 
       const result = await client.query(query, [userId]);
@@ -2047,8 +2054,15 @@ app.get("/message/unread/:userId", async (req, res) => {
         FROM message_logs ml
         WHERE ml.user_id = $1 
           AND ml.read_at IS NULL
-          AND ml.to_number IN (SELECT twilio_number FROM twilio_number_mapping)
-          AND ml.from_number NOT IN (SELECT twilio_number FROM twilio_number_mapping)
+          AND (
+            -- This handles inbound messages to the user (messages sent TO user's numbers)
+            (ml.to_number IN (SELECT twilio_number FROM user_numbers) 
+             AND ml.from_number NOT IN (SELECT twilio_number FROM user_numbers))
+            OR 
+            -- This handles outbound messages from the user that are unread
+            (ml.from_number IN (SELECT twilio_number FROM user_numbers)
+             AND ml.direction = 'outbound')
+          )
         GROUP BY from_number
         ORDER BY latest_message_time DESC
       `;
@@ -2056,7 +2070,7 @@ app.get("/message/unread/:userId", async (req, res) => {
       const groupedResult = await client.query(groupedMessagesQuery, [userId]);
       const messageBySender = groupedResult.rows;
 
-      // Debug the actual data in the table
+      // Debug query to see all relevant messages for this user
       const debugQuery = `
         SELECT id, message_sid, from_number, to_number, direction, read_at, user_id, status, created_at, body
         FROM message_logs
@@ -2070,6 +2084,27 @@ app.get("/message/unread/:userId", async (req, res) => {
         `Debug - Sample messages for user ${userId}:`,
         debugResult.rows
       );
+
+      // Check if any of these messages should be counted as unread for debugging
+      console.log("Eligible unread messages check:");
+      debugResult.rows.forEach((msg) => {
+        // Get the user's Twilio numbers for comparison
+        const isToUserNumber = userNumbersResult.rows.some(
+          (num) => num.twilio_number === msg.to_number
+        );
+        const isFromUserNumber = userNumbersResult.rows.some(
+          (num) => num.twilio_number === msg.from_number
+        );
+        const isUnread = msg.read_at === null;
+        const isOutboundFromUser =
+          isFromUserNumber && msg.direction === "outbound";
+        const isInboundToUser = isToUserNumber && !isFromUserNumber;
+        const shouldCount = isUnread && (isInboundToUser || isOutboundFromUser);
+
+        console.log(
+          `Message ID ${msg.id}: to=${msg.to_number}, from=${msg.from_number}, direction=${msg.direction}, isToUserNumber=${isToUserNumber}, isFromUserNumber=${isFromUserNumber}, isUnread=${isUnread}, shouldCount=${shouldCount}`
+        );
+      });
 
       // Try to attach friendly names to the senders
       const lookupNumbersQuery = `
@@ -2100,15 +2135,79 @@ app.get("/message/unread/:userId", async (req, res) => {
         }
       });
 
-      // Return both inbound unread count and total unread count with detailed message information
+      // Get additional outbound unread message stats for response building
+      const outboundQuery = `
+        WITH user_numbers AS (
+          SELECT twilio_number FROM twilio_number_mapping WHERE user_id = $1
+        )
+        SELECT 
+          COUNT(*) as outbound_count,
+          COALESCE(array_agg(distinct to_number) FILTER (WHERE to_number IS NOT NULL), ARRAY[]::text[]) as to_numbers,
+          COALESCE(json_agg(
+            json_build_object(
+              'id', id,
+              'message_sid', message_sid,
+              'from_number', from_number,
+              'to_number', to_number,
+              'body', body,
+              'status', status,
+              'direction', direction,
+              'created_at', created_at
+            )
+          ) FILTER (WHERE id IS NOT NULL), '[]'::json) as outbound_details
+        FROM message_logs ml
+        WHERE ml.user_id = $1 
+          AND ml.read_at IS NULL
+          AND ml.from_number IN (SELECT twilio_number FROM user_numbers)
+          AND ml.direction = 'outbound'
+      `;
+
+      const outboundResult = await client.query(outboundQuery, [userId]);
+      console.log("Outbound unread messages:", outboundResult.rows[0]);
+
+      // Combine inbound and outbound numbers for a complete picture
+      const combinedFromNumbers = [
+        ...new Set([
+          ...fromNumbers,
+          ...(outboundResult.rows[0].to_numbers || []),
+        ]),
+      ];
+
+      // Combine message details arrays if needed
+      let combinedMessageDetails = messageDetails;
+      const outboundDetails = outboundResult.rows[0].outbound_details || [];
+
+      // If query wasn't returning both inbound and outbound properly, merge them manually
+      if (messageDetails.length === 0 && outboundDetails.length > 0) {
+        combinedMessageDetails = outboundDetails;
+        console.log("Using outbound message details since inbound are empty");
+      } else if (messageDetails.length > 0 && outboundDetails.length > 0) {
+        // Check if outbound details are different from what's already in messageDetails
+        // Might need more sophisticated merging based on message IDs here
+        const messageIds = new Set(messageDetails.map((msg) => msg.id));
+        const newOutboundDetails = outboundDetails.filter(
+          (msg) => !messageIds.has(msg.id)
+        );
+
+        if (newOutboundDetails.length > 0) {
+          console.log(
+            `Adding ${newOutboundDetails.length} outbound messages not in the original results`
+          );
+          combinedMessageDetails = [...messageDetails, ...newOutboundDetails];
+        }
+      }
+
+      // Return the combined results
       return res.status(200).json({
         success: true,
-        unreadCount: unreadCount, // This is just inbound unread messages
-        totalUnreadCount: allUnreadCount, // This is ALL unread messages regardless of direction
-        hasUnread: allUnreadCount > 0, // Change to use total unread count
-        fromNumbers: fromNumbers, // Always return the array, even if empty
-        messageDetails: messageDetails, // Include detailed message information
-        messageBySender: messageBySender, // Messages grouped by sender with counts and timestamps
+        unreadCount:
+          unreadCount +
+          parseInt(outboundResult.rows[0].outbound_count || 0, 10),
+        totalUnreadCount: allUnreadCount,
+        hasUnread: allUnreadCount > 0,
+        fromNumbers: combinedFromNumbers,
+        messageDetails: combinedMessageDetails,
+        messageBySender: messageBySender,
       });
     } finally {
       client.release();
@@ -2166,8 +2265,15 @@ app.post("/message/mark-read", async (req, res) => {
            WHERE user_id = $1 
              AND from_number = $2 
              AND read_at IS NULL
-             AND to_number IN (SELECT twilio_number FROM user_numbers)
-             AND from_number NOT IN (SELECT twilio_number FROM user_numbers)
+             AND (
+               -- Inbound messages to user's numbers
+               (to_number IN (SELECT twilio_number FROM user_numbers)
+                AND from_number NOT IN (SELECT twilio_number FROM user_numbers))
+               OR
+               -- Outbound messages from user's numbers to this recipient
+               (from_number IN (SELECT twilio_number FROM user_numbers)
+                AND direction = 'outbound')
+             )
            RETURNING id, message_sid, from_number, to_number`,
           [userId, fromNumber]
         );
@@ -2184,8 +2290,15 @@ app.post("/message/mark-read", async (req, res) => {
            SET read_at = NOW(), updated_at = NOW()
            WHERE user_id = $1 
              AND read_at IS NULL
-             AND to_number IN (SELECT twilio_number FROM user_numbers)
-             AND from_number NOT IN (SELECT twilio_number FROM user_numbers)
+             AND (
+               -- Inbound messages to user's numbers
+               (to_number IN (SELECT twilio_number FROM user_numbers)
+                AND from_number NOT IN (SELECT twilio_number FROM user_numbers))
+               OR
+               -- Outbound messages from user's numbers
+               (from_number IN (SELECT twilio_number FROM user_numbers)
+                AND direction = 'outbound')
+             )
            RETURNING id, message_sid, from_number, to_number`,
           [userId]
         );
