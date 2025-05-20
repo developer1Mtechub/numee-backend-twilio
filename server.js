@@ -65,6 +65,52 @@ const fcmTokenStore = {
   },
 };
 
+// Helper function to get FCM tokens from database for a user
+async function getTokensFromDatabase(userId, email = null) {
+  try {
+    const client = await pool.connect();
+    try {
+      let deviceTokens = [];
+
+      // Try to get tokens by user ID first
+      if (userId) {
+        const tokenQuery = await client.query(
+          `SELECT device_token, platform FROM device_tokens WHERE user_id = $1`,
+          [userId]
+        );
+
+        if (tokenQuery.rows.length > 0) {
+          deviceTokens = tokenQuery.rows;
+        }
+      }
+
+      // If no tokens found by ID and we have email, try by email
+      if (deviceTokens.length === 0 && email) {
+        const tokenQuery = await client.query(
+          `SELECT device_token, platform FROM device_tokens WHERE email = $1`,
+          [email]
+        );
+
+        if (tokenQuery.rows.length > 0) {
+          deviceTokens = tokenQuery.rows;
+        }
+      }
+
+      // Format tokens to match fcmTokenStore format
+      return deviceTokens.map((row) => ({
+        token: row.device_token,
+        platform: row.platform,
+        lastUpdated: Date.now(),
+      }));
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error("Error retrieving FCM tokens from database:", error);
+    return [];
+  }
+}
+
 // Helper function to send push notifications for incoming calls
 async function sendCallNotification(userId, callData) {
   try {
@@ -1717,7 +1763,7 @@ app.post("/message/webhook", async (req, res) => {
           `SELECT user_id, email FROM twilio_number_mapping WHERE twilio_number = $1 AND is_active = true`,
           [to]
         );
-
+        console.log(`Number lookup query for ${to}:`, numberLookupQuery.rows);
         if (numberLookupQuery.rows.length > 0) {
           targetUserId = numberLookupQuery.rows[0].user_id;
           targetEmail = numberLookupQuery.rows[0].email;
@@ -2152,7 +2198,7 @@ app.get("/message/unread/:userId", async (req, res) => {
               'body', body,
               'status', status,
               'direction', direction,
-              'created_at', created_at
+              'created_at: created_at
             )
           ) FILTER (WHERE id IS NOT NULL), '[]'::json) as outbound_details
         FROM message_logs ml
@@ -2424,14 +2470,15 @@ app.post("/message/status", async (req, res) => {
         // Update message status in the database
         // Fix: Use explicit comparison with string literal to avoid type mismatch
         const updateResult = await client.query(
-          `UPDATE message_logs
+          `UPDATE message_logs ml
            SET status = $1, 
                updated_at = NOW(), 
                delivered_at = CASE WHEN status = 'delivered' THEN NOW() ELSE delivered_at END,
                error_code = $3,
                error_message = $4
            WHERE message_sid = $2
-           RETURNING *`,
+           RETURNING ml.*, 
+                    (SELECT email FROM Users WHERE id = ml.user_id) as email`,
           [messageStatus, messageSid, errorCode || null, errorMessage || null]
         );
 
@@ -2445,6 +2492,90 @@ app.post("/message/status", async (req, res) => {
             console.log(
               `Error details saved: Code ${errorCode}: ${errorMessage}`
             );
+          }
+
+          // Get the user ID for sending push notification
+          const targetUserId = updateResult.rows[0].user_id;
+          const fromNumber = updateResult.rows[0].from_number;
+          const toNumber = updateResult.rows[0].to_number;
+          const messageBody = updateResult.rows[0].body;
+          
+          // Also fetch the email for secondary lookup if user ID doesn't have tokens
+          const targetEmail = updateResult.rows[0].email;
+
+          // Send push notification to user about the status change if we have a user ID
+          if (targetUserId) {
+            try {
+              // Get user's FCM tokens from database instead of memory
+              const userTokens = await getTokensFromDatabase(targetUserId, targetEmail);
+
+              if (userTokens && userTokens.length > 0) {
+                console.log(
+                  `Sending push notification to user ${targetUserId} for message status update: ${messageStatus}`
+                );
+
+                // Send to all user devices
+                for (const tokenData of userTokens) {
+                  try {
+                    // Create notification based on message status
+                    let title = "Message Status Update";
+                    let body = "";
+
+                    if (messageStatus === "delivered") {
+                      body = `Message to ${toNumber} was delivered`;
+                    } else if (messageStatus === "failed") {
+                      body = `Message to ${toNumber} failed to deliver: ${
+                        errorMessage || "Unknown error"
+                      }`;
+                    } else {
+                      body = `Message status updated to: ${messageStatus}`;
+                    }
+
+                    const message = {
+                      token: tokenData.token,
+                      notification: {
+                        title: title,
+                        body: body,
+                      },
+                      data: {
+                        type: "messageStatus",
+                        messageSid: messageSid,
+                        status: messageStatus,
+                        timestamp: new Date().toISOString(),
+                      },
+                      android: {
+                        priority: "high",
+                        notification: {
+                          sound: "default",
+                        },
+                      },
+                      apns: {
+                        payload: {
+                          aps: {
+                            sound: "default",
+                          },
+                        },
+                      },
+                    };
+
+                    await admin.messaging().send(message);
+                    console.log(
+                      `Push notification sent to device: ${tokenData.token.substring(
+                        0,
+                        10
+                      )}...`
+                    );
+                  } catch (fcmError) {
+                    console.error("Error sending FCM notification:", fcmError);
+                  }
+                }
+              }
+            } catch (notificationError) {
+              console.error(
+                "Error sending push notification for message status update:",
+                notificationError
+              );
+            }
           }
         } else {
           console.log(`No message found with SID ${messageSid} in database`);
