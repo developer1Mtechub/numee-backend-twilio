@@ -2198,7 +2198,7 @@ app.get("/message/unread/:userId", async (req, res) => {
               'body', body,
               'status', status,
               'direction', direction,
-              'created_at: created_at
+              'created_at', created_at
             )
           ) FILTER (WHERE id IS NOT NULL), '[]'::json) as outbound_details
         FROM message_logs ml
