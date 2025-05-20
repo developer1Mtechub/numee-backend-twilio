@@ -2422,11 +2422,12 @@ app.post("/message/status", async (req, res) => {
             : "unknown";
 
         // Update message status in the database
+        // Fix: Use explicit comparison with string literal to avoid type mismatch
         const updateResult = await client.query(
           `UPDATE message_logs
            SET status = $1, 
                updated_at = NOW(), 
-               delivered_at = CASE WHEN $1 = 'delivered' THEN NOW() ELSE delivered_at END,
+               delivered_at = CASE WHEN status = 'delivered' THEN NOW() ELSE delivered_at END,
                error_code = $3,
                error_message = $4
            WHERE message_sid = $2
