@@ -1658,7 +1658,7 @@ app.post("/message/send", async (req, res) => {
       try {
         const userQuery = await client.query(
           `SELECT user_id FROM twilio_number_mapping WHERE twilio_number = $1`,
-          [fromNumber]
+          [to]
         );
 
         const userId =
@@ -1893,31 +1893,57 @@ app.post("/message/history", async (req, res) => {
       if (phoneNumber) {
         // Get messages between this user and a specific phone number
         query = `
-          SELECT DISTINCT ON (ml.id) ml.*, 
-                 CASE WHEN ml.direction = 'outbound' THEN true ELSE false END AS is_from_me,
+          WITH user_numbers AS (
+            SELECT twilio_number 
+            FROM twilio_number_mapping 
+            WHERE user_id = $1 AND is_active = true
+          )
+          SELECT ml.*, 
+                 CASE 
+                    WHEN ml.from_number IN (SELECT twilio_number FROM user_numbers) THEN true 
+                    ELSE false 
+                 END AS is_from_me,
                  tnm.friendly_name AS contact_name
           FROM message_logs ml
           LEFT JOIN twilio_number_mapping tnm ON 
             (ml.direction = 'inbound' AND ml.from_number = tnm.twilio_number) OR 
             (ml.direction = 'outbound' AND ml.to_number = tnm.twilio_number)
-          WHERE ml.user_id = $1 AND 
+          WHERE (
+                -- Show messages sent directly by this user or to this user
+                (EXISTS (SELECT 1 FROM user_numbers WHERE twilio_number IN (ml.from_number, ml.to_number)))
+                AND 
+                -- That involve the specified phone number
                 ((ml.from_number = $2) OR (ml.to_number = $2))
-          ORDER BY ml.id, ml.created_at DESC
+               )
+          ORDER BY ml.created_at DESC
           LIMIT $3 OFFSET $4
         `;
         params = [userId, phoneNumber, limit, offset];
       } else {
         // Get all messages for this user
         query = `
-          SELECT DISTINCT ON (ml.id) ml.*, 
-                 CASE WHEN ml.direction = 'outbound' THEN true ELSE false END AS is_from_me,
+          WITH user_numbers AS (
+            SELECT twilio_number 
+            FROM twilio_number_mapping 
+            WHERE user_id = $1 AND is_active = true
+          )
+          SELECT ml.*, 
+                 CASE 
+                    WHEN ml.from_number IN (SELECT twilio_number FROM user_numbers) THEN true 
+                    ELSE false 
+                 END AS is_from_me,
                  tnm.friendly_name AS contact_name
           FROM message_logs ml
           LEFT JOIN twilio_number_mapping tnm ON 
             (ml.direction = 'inbound' AND ml.from_number = tnm.twilio_number) OR 
             (ml.direction = 'outbound' AND ml.to_number = tnm.twilio_number)
-          WHERE ml.user_id = $1
-          ORDER BY ml.id, ml.created_at DESC
+          WHERE EXISTS (
+                 SELECT 1 FROM twilio_number_mapping 
+                 WHERE user_id = $1 
+                 AND is_active = true
+                 AND twilio_number IN (ml.from_number, ml.to_number)
+               )
+          ORDER BY ml.created_at DESC
           LIMIT $2 OFFSET $3
         `;
         params = [userId, limit, offset];
@@ -1932,8 +1958,31 @@ app.post("/message/history", async (req, res) => {
 
       // Count total messages for pagination
       const countQuery = phoneNumber
-        ? `SELECT COUNT(*) FROM message_logs WHERE user_id = $1 AND ((from_number = $2) OR (to_number = $2))`
-        : `SELECT COUNT(*) FROM message_logs WHERE user_id = $1`;
+        ? `WITH user_numbers AS (
+             SELECT twilio_number 
+             FROM twilio_number_mapping 
+             WHERE user_id = $1 AND is_active = true
+           )
+           SELECT COUNT(*) FROM message_logs ml
+           WHERE EXISTS (
+             SELECT 1 FROM twilio_number_mapping 
+             WHERE user_id = $1 
+             AND is_active = true
+             AND twilio_number IN (ml.from_number, ml.to_number)
+           )
+           AND ((ml.from_number = $2) OR (ml.to_number = $2))`
+        : `WITH user_numbers AS (
+             SELECT twilio_number 
+             FROM twilio_number_mapping 
+             WHERE user_id = $1 AND is_active = true
+           )
+           SELECT COUNT(*) FROM message_logs ml
+           WHERE EXISTS (
+             SELECT 1 FROM twilio_number_mapping 
+             WHERE user_id = $1 
+             AND is_active = true
+             AND twilio_number IN (ml.from_number, ml.to_number)
+           )`;
 
       const countParams = phoneNumber ? [userId, phoneNumber] : [userId];
       const countResult = await client.query(countQuery, countParams);
@@ -2499,7 +2548,7 @@ app.post("/message/status", async (req, res) => {
           const fromNumber = updateResult.rows[0].from_number;
           const toNumber = updateResult.rows[0].to_number;
           const messageBody = updateResult.rows[0].body;
-          
+
           // Also fetch the email for secondary lookup if user ID doesn't have tokens
           const targetEmail = updateResult.rows[0].email;
 
@@ -2507,7 +2556,10 @@ app.post("/message/status", async (req, res) => {
           if (targetUserId) {
             try {
               // Get user's FCM tokens from database instead of memory
-              const userTokens = await getTokensFromDatabase(targetUserId, targetEmail);
+              const userTokens = await getTokensFromDatabase(
+                targetUserId,
+                targetEmail
+              );
 
               if (userTokens && userTokens.length > 0) {
                 console.log(
