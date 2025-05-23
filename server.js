@@ -819,20 +819,35 @@ app.post("/twiml", (req, res) => {
     const to = req.body.To || "";
     const from = req.body.From || "";
     const callSid = req.body.CallSid || "";
+    // const dialStatus = req.body.DialCallStatus;
+    // console.log("dialcallstaus", dialStatus);
     const dialStatus = req.body.DialCallStatus;
-    console.log("dialcallstaus", dialStatus);
+    const callStatus = req.body.CallStatus;
+    console.log("callStatus", callStatus);
 
-    // Add debug logs to trace call flow
-    console.log(`Call from ${from} to ${to} with SID ${callSid}`);
-    console.log("Call details:", JSON.stringify(req.body));
-    // 🛑 NEW: This request is a callback from a completed <Dial>, not a fresh call
-    if (dialStatus) {
-      console.log("Received Dial status callback. Not redialing.");
-      voiceResponse.say("Thanks for calling. Goodbye.");
+    if (
+      dialStatus ||
+      callStatus === "in-progress" ||
+      callStatus === "completed"
+    ) {
+      console.log("Twilio callback after dial — skipping redial.");
+      const voiceResponse = new twiml.VoiceResponse();
+      voiceResponse.say("Call already handled. Goodbye.");
       voiceResponse.hangup();
       res.type("text/xml");
       return res.send(voiceResponse.toString());
     }
+    // Add debug logs to trace call flow
+    console.log(`Call from ${from} to ${to} with SID ${callSid}`);
+    console.log("Call details:", JSON.stringify(req.body));
+    // 🛑 NEW: This request is a callback from a completed <Dial>, not a fresh call
+    // if (dialStatus) {
+    //   console.log("Received Dial status callback. Not redialing.");
+    //   voiceResponse.say("Thanks for calling. Goodbye.");
+    //   voiceResponse.hangup();
+    //   res.type("text/xml");
+    //   return res.send(voiceResponse.toString());
+    // }
     // Add defensive check for empty 'to' parameter
     if (!to) {
       console.error("Missing 'to' parameter in TwiML request");
