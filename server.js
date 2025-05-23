@@ -819,11 +819,20 @@ app.post("/twiml", (req, res) => {
     const to = req.body.To || "";
     const from = req.body.From || "";
     const callSid = req.body.CallSid || "";
+    const dialStatus = req.body.DialCallStatus;
+    console.log("dialcallstaus", dialStatus);
 
     // Add debug logs to trace call flow
     console.log(`Call from ${from} to ${to} with SID ${callSid}`);
     console.log("Call details:", JSON.stringify(req.body));
-
+    // 🛑 NEW: This request is a callback from a completed <Dial>, not a fresh call
+    if (dialStatus) {
+      console.log("Received Dial status callback. Not redialing.");
+      voiceResponse.say("Thanks for calling. Goodbye.");
+      voiceResponse.hangup();
+      res.type("text/xml");
+      return res.send(voiceResponse.toString());
+    }
     // Add defensive check for empty 'to' parameter
     if (!to) {
       console.error("Missing 'to' parameter in TwiML request");
@@ -877,33 +886,49 @@ app.post("/twiml", (req, res) => {
     if (callSid) {
       callStore.trackCall(callSid, { dialed: true });
     }
+    // DIAL logic
+    const dial = voiceResponse.dial({
+      callerId: from,
+      timeout: 30,
+      // 🔴 REMOVE this to avoid triggering post-dial call
+      // action: `${backend_url}/call-action-result`,
+      // method: "POST",
+    });
 
-    // Check if we're calling a client (app user) or regular number
-    if (to.indexOf("client:") === 0) {
-      // This is a call to another app user
+    if (to.startsWith("client:")) {
       const clientId = to.split(":")[1];
-
-      // DIRECT CONNECTION: Removed the "Connecting you to another user" message to avoid the call being perceived as a new call
-      const dial = voiceResponse.dial({
-        callerId: from,
-        timeout: 30,
-        action: `${backend_url}/call-action-result`,
-        method: "POST",
-      });
       dial.client(clientId);
       console.log(`Connecting to client: ${clientId}`);
     } else {
-      // This is a call to a regular phone number
-      // DIRECT CONNECTION: Removed the "Connecting your call" message to avoid the call being perceived as a new call
-      const dial = voiceResponse.dial({
-        callerId: from,
-        timeout: 30,
-        action: `${backend_url}/call-action-result`,
-        method: "POST",
-      });
       dial.number(to);
       console.log(`Connecting to number: ${to}`);
     }
+    // Check if we're calling a client (app user) or regular number
+    // if (to.indexOf("client:") === 0) {
+    //   // This is a call to another app user
+    //   const clientId = to.split(":")[1];
+
+    //   // DIRECT CONNECTION: Removed the "Connecting you to another user" message to avoid the call being perceived as a new call
+    //   const dial = voiceResponse.dial({
+    //     callerId: from,
+    //     timeout: 30,
+    //     action: `${backend_url}/call-action-result`,
+    //     method: "POST",
+    //   });
+    //   dial.client(clientId);
+    //   console.log(`Connecting to client: ${clientId}`);
+    // } else {
+    //   // This is a call to a regular phone number
+    //   // DIRECT CONNECTION: Removed the "Connecting your call" message to avoid the call being perceived as a new call
+    //   const dial = voiceResponse.dial({
+    //     callerId: from,
+    //     timeout: 30,
+    //     action: `${backend_url}/call-action-result`,
+    //     method: "POST",
+    //   });
+    //   dial.number(to);
+    //   console.log(`Connecting to number: ${to}`);
+    // }
 
     console.log("Generated TwiML:", voiceResponse.toString());
     res.type("text/xml");
