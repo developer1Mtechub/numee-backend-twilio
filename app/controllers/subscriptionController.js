@@ -440,105 +440,105 @@ exports.cancelSubscription = async (req, res) => {
       subscription.current_period_end * 1000
     ).toLocaleDateString();
 
-    await transporter.sendMail({
-      from: process.env.EMAIL_USERNAME,
-      to: email,
-      subject: "📅 Your Subscription Has Been Cancelled",
-      html: `
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Subscription Cancellation</title>
-                <style>
-                    body {
-                        font-family: Arial, sans-serif;
-                        margin: 0;
-                        padding: 0;
-                        background-color: #f9f9f9;
-                    }
-                    .email-container {
-                        background-color: #ffffff;
-                        margin: 20px auto;
-                        padding: 20px;
-                        border-radius: 8px;
-                        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-                        max-width: 600px;
-                    }
-                    .header {
-                        text-align: center;
-                    }
-                    .header img {
-                        width: 120px;
-                    }
-                    .content {
-                        margin: 20px 0;
-                        text-align: center;
-                    }
-                    .content h1 {
-                        color: #d9534f;
-                    }
-                    .content p {
-                        color: #666666;
-                        font-size: 16px;
-                        margin: 10px 0;
-                    }
-                    .cta-button {
-                        display: inline-block;
-                        background-color: #007bff;
-                        color: white;
-                        text-decoration: none;
-                        padding: 12px 24px;
-                        margin: 20px 0;
-                        border-radius: 5px;
-                        font-weight: bold;
-                    }
-                    .footer {
-                        text-align: center;
-                        margin-top: 30px;
-                        font-size: 12px;
-                        color: #999999;
-                    }
-                    .social-icons {
-                        margin: 20px 0;
-                        text-align: center;
-                    }
-                    .social-icons a {
-                        margin: 0 10px;
-                        display: inline-block;
-                    }
-                    .social-icons img {
-                        width: 24px;
-                        height: 24px;
-                    }
-                </style>
-            </head>
-            <body>
-                <div class="email-container">
-                    <div class="header">
-                        <img src="https://res.cloudinary.com/ddorrmob5/image/upload/v1736338301/hoifnqb1bwmdhmunidug.png" alt="Company Logo">
-                    </div>
-                    <div class="content">
-                        <h1>📅 Subscription Cancelled</h1>
-                        <p>Hello,</p>
-                        <p>Your subscription has been successfully cancelled. However, you'll still have access to all premium features until:</p>
-                        <p><strong>${subscriptionEndDate}</strong></p> 
-                    </div>
-                    <div class="social-icons">
-                        <a href="https://facebook.com/yourpage"><img src="https://cdn-icons-png.flaticon.com/512/733/733547.png" alt="Facebook"></a>
-                        <a href="https://twitter.com/yourpage"><img src="https://cdn-icons-png.flaticon.com/512/733/733579.png" alt="Twitter"></a>
-                        <a href="https://instagram.com/yourpage"><img src="https://cdn-icons-png.flaticon.com/512/733/733558.png" alt="Instagram"></a>
-                    </div>
-                    <div class="footer">
-                        <p>&copy; ${new Date().getFullYear()} Your Company. All rights reserved.</p>
-                        <p><a href="https://yourwebsite.com/privacy-policy">Privacy Policy</a> | <a href="https://yourwebsite.com/terms">Terms of Service</a></p>
-                    </div>
-                </div>
-            </body>
-            </html>
-        `,
-    });
+    // await transporter.sendMail({
+    //   from: process.env.EMAIL_USERNAME,
+    //   to: email,
+    //   subject: "📅 Your Subscription Has Been Cancelled",
+    //   html: `
+    //         <!DOCTYPE html>
+    //         <html>
+    //         <head>
+    //             <meta charset="UTF-8">
+    //             <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    //             <title>Subscription Cancellation</title>
+    //             <style>
+    //                 body {
+    //                     font-family: Arial, sans-serif;
+    //                     margin: 0;
+    //                     padding: 0;
+    //                     background-color: #f9f9f9;
+    //                 }
+    //                 .email-container {
+    //                     background-color: #ffffff;
+    //                     margin: 20px auto;
+    //                     padding: 20px;
+    //                     border-radius: 8px;
+    //                     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    //                     max-width: 600px;
+    //                 }
+    //                 .header {
+    //                     text-align: center;
+    //                 }
+    //                 .header img {
+    //                     width: 120px;
+    //                 }
+    //                 .content {
+    //                     margin: 20px 0;
+    //                     text-align: center;
+    //                 }
+    //                 .content h1 {
+    //                     color: #d9534f;
+    //                 }
+    //                 .content p {
+    //                     color: #666666;
+    //                     font-size: 16px;
+    //                     margin: 10px 0;
+    //                 }
+    //                 .cta-button {
+    //                     display: inline-block;
+    //                     background-color: #007bff;
+    //                     color: white;
+    //                     text-decoration: none;
+    //                     padding: 12px 24px;
+    //                     margin: 20px 0;
+    //                     border-radius: 5px;
+    //                     font-weight: bold;
+    //                 }
+    //                 .footer {
+    //                     text-align: center;
+    //                     margin-top: 30px;
+    //                     font-size: 12px;
+    //                     color: #999999;
+    //                 }
+    //                 .social-icons {
+    //                     margin: 20px 0;
+    //                     text-align: center;
+    //                 }
+    //                 .social-icons a {
+    //                     margin: 0 10px;
+    //                     display: inline-block;
+    //                 }
+    //                 .social-icons img {
+    //                     width: 24px;
+    //                     height: 24px;
+    //                 }
+    //             </style>
+    //         </head>
+    //         <body>
+    //             <div class="email-container">
+    //                 <div class="header">
+    //                     <img src="https://res.cloudinary.com/ddorrmob5/image/upload/v1736338301/hoifnqb1bwmdhmunidug.png" alt="Company Logo">
+    //                 </div>
+    //                 <div class="content">
+    //                     <h1>📅 Subscription Cancelled</h1>
+    //                     <p>Hello,</p>
+    //                     <p>Your subscription has been successfully cancelled. However, you'll still have access to all premium features until:</p>
+    //                     <p><strong>${subscriptionEndDate}</strong></p>
+    //                 </div>
+    //                 <div class="social-icons">
+    //                     <a href="https://facebook.com/yourpage"><img src="https://cdn-icons-png.flaticon.com/512/733/733547.png" alt="Facebook"></a>
+    //                     <a href="https://twitter.com/yourpage"><img src="https://cdn-icons-png.flaticon.com/512/733/733579.png" alt="Twitter"></a>
+    //                     <a href="https://instagram.com/yourpage"><img src="https://cdn-icons-png.flaticon.com/512/733/733558.png" alt="Instagram"></a>
+    //                 </div>
+    //                 <div class="footer">
+    //                     <p>&copy; ${new Date().getFullYear()} Your Company. All rights reserved.</p>
+    //                     <p><a href="https://yourwebsite.com/privacy-policy">Privacy Policy</a> | <a href="https://yourwebsite.com/terms">Terms of Service</a></p>
+    //                 </div>
+    //             </div>
+    //         </body>
+    //         </html>
+    //     `,
+    // });
 
     res.json({
       success: true,
